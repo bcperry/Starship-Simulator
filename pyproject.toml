@@ -3,7 +3,9 @@ name = "simulator"
 version = "0.1.0"
 description = "Minimal physics-model rocket simulator"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "matplotlib>=3.11.2",
+]
 
 [project.scripts]
 simulator = "simulator.__main__:main"
@@ -13,7 +15,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = []
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]
 
 [tool.ruff]
 line-length = 100
