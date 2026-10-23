@@ -1,5 +1,5 @@
-"""Minimal physics-model rocket simulator."""
+"""Minimal 3-D rocket simulator."""
 
-from .rocket import Rocket, SimResult, simulate, summary
+from .rocket import DEG, G0, Pitch, Rocket, SimResult, Site, simulate, summary
 
-__all__ = ["Rocket", "SimResult", "simulate", "summary"]
+__all__ = ["DEG", "G0", "Pitch", "Rocket", "SimResult", "Site", "simulate", "summary"]
