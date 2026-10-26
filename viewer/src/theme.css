@@ -1,0 +1,54 @@
+/* ── design tokens — tune the whole viewer from here ──────────────────── */
+:root {
+  --bg: #070b12;
+  --bg-grad: radial-gradient(1200px 600px at 70% -10%, #101b2e 0%, #070b12 55%);
+  --panel: #0e1522;
+  --panel-2: #121b2b;
+  --panel-line: #1d2a3f;
+  --panel-line-soft: #182234;
+  --ink: #e8eef7;
+  --ink-2: #a7b6cc;
+  --ink-3: #6c7d95;
+  --ink-4: #49586f;
+  --accent: #37e1a8;      /* firing / primary */
+  --accent-ink: #07130e;
+  --cyan: #4fd6ff;
+  --amber: #ffb454;
+  --red: #ff5d6c;
+  --idle: #5b6b82;
+  --thrust: #37e1a8;
+  --mdot: #4fd6ff;
+  --pc: #b392ff;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --r: 14px;
+  --r-sm: 10px;
+  --font: "Inter", "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, "Cascadia Code", monospace;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg) fixed, var(--bg-grad);
+  color: var(--ink);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-size: 14px;
+  line-height: 1.45;
+}
+::selection { background: rgba(55, 225, 168, 0.35); }
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dim { color: var(--ink-3); }
+.dimmer { color: var(--ink-4); }
+.small { font-size: 12px; }
+.tiny { font-size: 11px; }
+.up { letter-spacing: 0.08em; text-transform: uppercase; }
+
+/* scrollbars */
+* { scrollbar-width: thin; scrollbar-color: #24344d transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #24344d; border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }

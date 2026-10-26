@@ -1,0 +1,136 @@
+# Local Kafka for the telemetry layer: broker + a streaming client (console viewer),
+# plus an optional vehicle-side command sender so there is data to watch.
+#
+#   docker compose up -d watch            # broker + live consumer (shows any traffic)
+#   docker compose -p simulator --profile vehicle up -d   # also start the command sender
+#   docker compose -p simulator logs -f watch vehicle
+#   docker compose -p simulator down -v   # stop and wipe broker data
+#
+# Client view: one consumer per topic (separate groups, from the earliest
+# available record), printing "key <TAB> json" so per-engine ordering is visible.
+#
+# To get *telemetry* flowing, attach an engine from the host (WSL) to this
+# broker — it consumes the command stream the vehicle sends out and publishes
+# one engine.telemetry per command into starship.engine.telemetry, which the
+# watch consumer immediately shows:
+#
+#   uv run python -m simulator.telemetry \
+#     --engine-id sh-01 --vehicle-id starship \
+#     --command-topic starship.engine.command \
+#     --telemetry-topic starship.engine.telemetry \
+#     --bootstrap-servers localhost:9092 --idle-timeout 600
+#
+# Topics (auto-created, 3 partitions):
+#   starship.engine.command    vehicle -> engines   (JSON engine.command, key = engine id)
+#   starship.engine.telemetry  engines -> vehicle   (JSON engine.telemetry, key = engine id)
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.6.3
+    container_name: sim-kafka
+    ports:
+      - "9092:9092"   # PLAINTEXT broker endpoint, reachable from the host
+    environment:
+      # single-node KRaft (broker + controller roles in one process)
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # single-node sensible defaults
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: "3"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL",
+             "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # The client service: tails both topics and prints records live
+  # ("key<TAB>json"). Starts as soon as the broker is healthy and keeps
+  # running; shows whatever is on the wire (earliest available record up).
+  watch:
+    image: confluentinc/cp-kafka:7.6.3
+    container_name: sim-watch
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        trap 'exit 0' TERM
+        kafka-console-consumer \
+          --bootstrap-server kafka:9092 \
+          --topic starship.engine.command \
+          --consumer.config group.id=sim-watch-commands \
+          --consumer.config auto.offset.reset=earliest \
+          --consumer.config max.poll.interval.ms=600000 \
+          --property print.key=true \
+          --property print.line=true \
+          --from-beginning | sed -u 's/^/[command]   /' &
+        kafka-console-consumer \
+          --bootstrap-server kafka:9092 \
+          --topic starship.engine.telemetry \
+          --consumer.config group.id=sim-watch-telemetry \
+          --consumer.config auto.offset.reset=earliest \
+          --consumer.config max.poll.interval.ms=600000 \
+          --property print.key=true \
+          --property print.line=true \
+          --from-beginning | sed -u 's/^/[telemetry] /' &
+        wait
+    restart: unless-stopped
+
+  # Vehicle side (optional): fires one engine.command per engine every 100 ms,
+  # exactly the to_command() v1 wire format, keyed by engine id, so attached
+  # engine processes have work to do — and watch has data to show.
+  vehicle:
+    image: confluentinc/cp-kafka:7.6.3
+    container_name: sim-vehicle
+    profiles: ["vehicle"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        set -eu
+        TOPIC=starship.engine.command
+        ENGINES=33
+        DT=0.01
+        THR=1.0
+        AMBIENT=101325
+        {
+          step=1
+          t=0.0
+          while true; do
+            for i in $(seq 1 "$ENGINES"); do
+              eid="sh-$(printf '%02d' "$i")"
+              ts_ms=$(date +%s%3N)
+              printf '%s\t{"v":1,"type":"engine.command","vehicle_id":"starship","engine_id":"%s","seq":%d,"t":%s,"dt":%s,"throttle_demand_frac":%s,"ambient_pressure_pa":%d,"ts_ms":%d}\n' \
+                "$eid" "$eid" "$step" "$t" "$DT" "$THR" "$AMBIENT" "$ts_ms"
+            done
+            sleep 0.1
+            step=$((step + 1))
+            t=$(awk -v x="$t" -v d="$DT" 'BEGIN{printf "%.2f", x + d}')
+          done
+        } | kafka-produce-console \
+            --bootstrap-server kafka:9092 \
+            --topic "$TOPIC" \
+            --property parse.key=true \
+            --property key.separator=	
+    restart: unless-stopped
+
+volumes:
+  kafka-data:

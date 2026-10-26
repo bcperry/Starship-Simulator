@@ -15,6 +15,8 @@ simulator/
                 __main__.py (standalone engine process over Kafka)
   rocket.py     flight model, pitch program, simulation loop
   __main__.py   CLI (argparse, plots to trajectory.png)
+viewer/         TypeScript/React telemetry viewer (full-stack UX foundation)
+                shared/ wire types · server/ (Fastify+SSE, mock|Kafka) · src/
 tests/          pytest suite
 scripts/        engine_demo.py, fleet_demo.py, command_fleet_demo.py,
                 gui_smoke.py, plot.py
@@ -129,6 +131,40 @@ eng = TelemetryEngine("sh-07", RaptorEngine(), pub, vehicle_id="super-heavy")
 # vehicle sim: consume the topic (key = engine_id), fold each timestep
 # into aggregate_fleet()
 ```
+
+### Telemetry UI (`viewer/` — the full-stack foundation)
+
+A **TypeScript/React** viewer for exactly this wire — the starting point for
+building the product UX. It has two interchangeable data sources behind one
+`/api/stream`:
+
+- **`kafka`** — consumes your broker (`starship.engine.command` +
+  `starship.engine.telemetry`), the same records as above;
+- **`mock`** — a synthetic 33-engine stream (one starves → `cut`) so you can
+  shape the UI with no broker attached.
+
+You get a live fleet board (total thrust, propellant flow, firing/cut counts,
+worst chamber pressure/ISP, min propellant remaining), a thrust-and-flow
+trend chart, per-engine cards (state, P_c, Isp, mdot, propellant, throttle
+demand vs actual, sparklines, command/telemetry seq), and a raw message feed.
+
+```bash
+cd viewer && npm install
+
+SOURCE=mock npm run dev                          # build the UX with a synthetic feed
+SOURCE=kafka BOOTSTRAP_SERVERS=localhost:9092 \
+  COMMAND_TOPIC=starship.engine.command \
+  TELEMETRY_TOPIC=starship.engine.telemetry \
+  npm run dev                                     # ...or against your docker-broker
+
+npm run build && SOURCE=kafka npm start           # one port: API + UI on :8080
+```
+
+The architecture is deliberately composable — `shared/types.ts` (wire schema),
+`server/sources.ts` (`MockSource`/`KafkaSource` behind one `Source`),
+`server/state.ts` (ring-buffer + snapshot pub/sub), and
+`src/hooks/useFeed.ts` (store→React). Adding a graph, a new panel, a replay
+source, or persistence is a local change. See `viewer/README.md`.
 
 ## Engine GUI (Streamlit)
 
