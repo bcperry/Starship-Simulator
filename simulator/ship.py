@@ -80,6 +80,11 @@ DEFAULT_VARI_FRAC = 0.01
 #: reality: most launches 0-2, occasionally 3+)
 DEFAULT_EXPECTED_FAILURES_PER_RUN = 2.0
 
+#: default natural high-frequency jitter: 2 % rms per-step Gaussian on
+#: chamber pressure (combustion acoustics / feed turbulence) — visible
+#: high-frequency breathing on every output
+DEFAULT_NOISE_FRAC = 0.02
+
 #: below this actual mass flow an engine counts as idle (denoise floor, kg/s)
 _FIRING_EPS_MDOT = 1e-9
 
@@ -98,6 +103,12 @@ class ShipConfig:
       - ``fail_hazard_per_s``: directly specify the exponentials-time-to-failure
         hazard rate lambda (1/s) per engine; overrides the expected-failures
         calibration when set.
+
+    Natural output jitter (see module docstring):
+      - ``noise_frac``: per-step zero-mean Gaussian jitter (fraction of the
+        nominal value) on chamber pressure and expansion efficiency, so
+        chamber pressure, mass flows and thrust all breathe together at high
+        frequency (default 0.02 = 2 % rms; 0.0 = deterministic baseline).
     """
 
     vehicle_id: str = "super-heavy"
@@ -112,6 +123,7 @@ class ShipConfig:
     engine_prefix: str = "sh"
     expected_failures_per_run: float = DEFAULT_EXPECTED_FAILURES_PER_RUN
     fail_hazard_per_s: float | None = None
+    noise_frac: float = DEFAULT_NOISE_FRAC
 
     def __post_init__(self) -> None:
         if self.n_engines < 1:
@@ -132,6 +144,8 @@ class ShipConfig:
             raise ValueError(
                 f"fail_hazard_per_s must be >= 0, got {self.fail_hazard_per_s}"
             )
+        if not 0.0 <= self.noise_frac <= 0.05:
+            raise ValueError(f"noise_frac must be in [0, 0.05], got {self.noise_frac}")
 
 
 def make_engine(
@@ -164,10 +178,12 @@ def make_engine(
 class _Member:
     """One engine slot on the ship: identity + model + its state."""
 
-    def __init__(self, engine_id: str, engine: RaptorEngine) -> None:
+    def __init__(self, engine_id: str, engine: RaptorEngine,
+                 noise_seed: str | int | None = None) -> None:
         self.engine_id = engine_id
         self.engine = engine
-        self.state = EngineState(engine)
+        # each engine draws its own reproducible high-frequency noise stream
+        self.state = EngineState(engine, seed=f"starship|noise|{noise_seed}")
         self.failed = False
         self.fail_time: float | None = None
 
@@ -186,7 +202,9 @@ class Ship:
         base_engine: RaptorEngine | None = None,
     ) -> None:
         self.config = config or ShipConfig()
-        self._base = base_engine or RaptorEngine(throttle_time_constant=0.25)
+        self._base = base_engine or RaptorEngine(
+            throttle_time_constant=0.25, noise_frac=self.config.noise_frac
+        )
         self.seed = self.config.seed
         self.vari_frac = self.config.vari_frac
         self.throttle_cmd = self.config.throttle_frac
@@ -204,6 +222,7 @@ class Ship:
         throttle_frac: float | None = None,
         expected_failures_per_run: float | None = None,
         fail_hazard_per_s: float | None = None,
+        noise_frac: float | None = None,
     ) -> str:
         """(Re)start a run: re-draw fleet variability and reset tank + states.
 
@@ -243,6 +262,11 @@ class Ship:
             raise ValueError(f"expected_failures_per_run must be >= 0, got {expected_failures}")
         if fail_hazard is not None and fail_hazard < 0.0:
             raise ValueError(f"fail_hazard_per_s must be >= 0, got {fail_hazard}")
+        if noise_frac is not None and not 0.0 <= float(noise_frac) <= 0.05:
+            raise ValueError(f"noise_frac must be in [0, 0.05], got {noise_frac}")
+        if noise_frac is not None and self._base is not None:
+            # live retune for runs started via the control path
+            self._base = dataclasses.replace(self._base, noise_frac=float(noise_frac))
 
         self.config = dataclasses.replace(
             self.config,
@@ -253,6 +277,7 @@ class Ship:
             tank_ch4_kg=tank_ch4_kg,
             expected_failures_per_run=expected_failures,
             fail_hazard_per_s=fail_hazard,
+            **( {"noise_frac": float(noise_frac)} if noise_frac is not None else {} ),
         )
         self.seed = seed
         self.vari_frac = vari_frac
@@ -260,6 +285,7 @@ class Ship:
             _Member(
                 engine_id=f"{self.config.engine_prefix}-{i + 1:02d}",
                 engine=make_engine(self._base, i, self.config.vehicle_id, seed, vari_frac),
+                noise_seed=f"{self.config.vehicle_id}|{seed}|{i}",
             )
             for i in range(n_engines)
         ]
@@ -325,6 +351,7 @@ class Ship:
                 throttle_frac=ctrl.get("throttle_frac"),
                 expected_failures_per_run=ctrl.get("expected_failures_per_run"),
                 fail_hazard_per_s=ctrl.get("fail_hazard_per_s"),
+                noise_frac=ctrl.get("noise_frac"),
             )
             return {"command": "start_run", "ok": True, "run_id": run_id}
 

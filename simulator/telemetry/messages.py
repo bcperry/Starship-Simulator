@@ -515,4 +515,8 @@ def validate_ship_control(cm: dict) -> ShipControlMessage:
             raise ValueError("expected_failures_per_run must be >= 0")
         if "fail_hazard_per_s" in cm and cm["fail_hazard_per_s"] is not None and float(cm["fail_hazard_per_s"]) < 0.0:
             raise ValueError("fail_hazard_per_s must be >= 0")
+        if "noise_frac" in cm and cm["noise_frac"] is not None:
+            n = float(cm["noise_frac"])
+            if not 0.0 <= n <= 0.05:
+                raise ValueError("noise_frac must be in [0, 0.05]")
     return cm  # type: ignore[return-value]

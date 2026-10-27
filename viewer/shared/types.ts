@@ -104,8 +104,10 @@ export interface ShipControlMessage {
   throttle_frac?: number;
   /** expected fleet failures over the nominal full-tank burn (0 = failure-free) */
   expected_failures_per_run?: number;
-  /** raw per-engine hazard rate in 1/s; overrides the calibration when > 0 */
+  /** raw per-engine hazard rate in 1/s; overrides the calibration when > 0 (0 clears) */
   fail_hazard_per_s?: number;
+  /** natural high-frequency jitter fraction (0.004 = 0.4 % rms on chamber pressure) */
+  noise_frac?: number;
 }
 
 export interface ShipAck {

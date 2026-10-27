@@ -427,3 +427,62 @@ def test_meco_stops_failure_rolls():
         ship.step()
     ids_after = [m.engine_id for m in ship._members if m.failed]
     assert ids_after == ids_before
+
+
+def test_ship_outputs_breathe_with_high_frequency_jitter():
+    """Default ship config: per-engine thrust jitters step-to-step (~2 % rms),
+    fleet total jitters at the reduced 2 %/sqrt(N) level, all around the
+    nominal operating point (zero-mean natural breathing)."""
+    ship = Ship(_cfg(seed=3, n_engines=8))
+    for _ in range(200):
+        ship.step()
+    # sample one engine over 100 steps
+    thrusts = []
+    for _ in range(100):
+        for d in ship.step():
+            if d["type"] == ENGINE_TELEMETRY and d["engine_id"] == ship._members[0].engine_id:
+                thrusts.append(d["thrust_n"])
+    mean = sum(thrusts) / len(thrusts)
+    std = (sum((x - mean) ** 2 for x in thrusts) / len(thrusts)) ** 0.5
+    assert 0.008 < std / mean < 0.045            # visible high-frequency breathing
+    # fleet total: independent engines -> reduced relative spread
+    totals = []
+    for _ in range(100):
+        docs = ship.step()
+        totals.append(sum(d["thrust_n"] for d in docs if d["type"] == ENGINE_TELEMETRY))
+    tmean = sum(totals) / len(totals)
+    tstd = (sum((x - tmean) ** 2 for x in totals) / len(totals)) ** 0.5
+    assert 0.001 < tstd / tmean < 0.01
+    # and it stays centred on the nominal ~1.8 MN/engine band
+    assert 1.5e6 < tmean / ship.config.n_engines < 2.2e6
+
+
+def test_ship_jitter_is_deterministic_per_run_and_retunable():
+    s1 = Ship(_cfg(seed=5, n_engines=4))
+    s2 = Ship(_cfg(seed=5, n_engines=4))
+    sq1 = [sum(d["thrust_n"] for d in s1.step() if d["type"] == ENGINE_TELEMETRY) for _ in range(50)]
+    sq2 = [sum(d["thrust_n"] for d in s2.step() if d["type"] == ENGINE_TELEMETRY) for _ in range(50)]
+    assert sq1 == sq2  # same seed -> identical noise streams
+
+    def warm(n):  # let the chamber-pressure lag settle, then measure
+        for _ in range(300):
+            s1.step()
+        return [
+            sum(d["thrust_n"] for d in s1.step() if d["type"] == ENGINE_TELEMETRY)
+            for _ in range(n)
+        ]
+
+    # control path can retune the jitter; 0 gives a perfectly flat baseline
+    s1.apply_control(ship_control("sh-test", "start_run", seed=5, noise_frac=0.0))
+    flat = warm(100)
+    assert max(flat) - min(flat) < 1e-6 * max(flat)  # converged & noise-free
+    s1.apply_control(ship_control("sh-test", "start_run", seed=5, noise_frac=0.04))
+    lively = warm(150)
+    mean = sum(lively) / len(lively)
+    assert max(lively) - min(lively) > 0.01 * mean   # 4 % rms -> visible breathing
+    # out-of-range rejected on the wire
+    import pytest
+    with pytest.raises(ValueError):
+        validate_ship_control(to_ship_control("start_run", noise_frac=0.1))
+    with pytest.raises(ValueError):
+        validate_ship_control(to_ship_control("start_run", noise_frac=-0.01))

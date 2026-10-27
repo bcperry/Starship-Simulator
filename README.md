@@ -188,6 +188,15 @@ also *fail* at a random moment during the burn:
     launches failure-free; 1-3 is the observed standard band.
   - `fail_hazard_per_s` (`--fail-hazard`): pass the distribution parameter
     directly, overriding the calibration.
+  - `noise_frac` (`--noise`, default **0.02**): natural high-frequency jitter —
+    a per-step zero-mean Gaussian (fraction of the nominal value) on chamber
+    pressure plus a smaller expansion-efficiency wobble. The choked-flow
+    relation carries the pressure jitter into mdot, exit pressure and Isp, so
+    chamber pressure, propellant flow and thrust all *breathe* together at
+    high frequency, independently per engine (each engine draws its own
+    reproducible stream; 0.02 = 2 % rms on chamber pressure, 0 = fully
+    deterministic). All other model inputs are unchanged by this.
+    - Retunable live: `start_run` accepts `noise_frac` (0–0.05).
 - **Mechanics**: every step, each live engine rolls
   `P(fail) = 1 - exp(-lambda dt)` (exact discrete survival, dt-invariant).
   A failed engine produces no thrust and draws no propellant — the shared

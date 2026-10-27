@@ -19,6 +19,7 @@ export function ControlPanel({ ship, vehicleId }: Props) {
   const [vari, setVari] = useState(1);
   const [failures, setFailures] = useState<number>(2);
   const [hazard, setHazard] = useState("");
+  const [jitter, setJitter] = useState<number>(2);
 
   const send = (command: string, payload: Record<string, unknown> = {}) =>
     clientFeed.sendControl({ vehicle_id: vehicleId, command, ...payload });
@@ -52,6 +53,7 @@ export function ControlPanel({ ship, vehicleId }: Props) {
               expected_failures_per_run: Math.max(0, failures),
               // 0 = clear any raw-hazard override, so the expectation drives the model
               fail_hazard_per_s: hz > 0 ? hz : 0.0,
+              noise_frac: Math.min(5, Math.max(0, jitter)) / 100,
             };
             void send("start_run", payload);
           }}>
@@ -118,6 +120,17 @@ export function ControlPanel({ ship, vehicleId }: Props) {
       </div>
 
       <div className="ctrlrow">
+        <label className="mini" title="per-step Gaussian jitter on chamber pressure (natural high-frequency breathing)">
+          <span>jitter %/step</span>
+          <input
+            type="number"
+            min={0}
+            max={5}
+            step={0.1}
+            value={jitter}
+            onChange={(e) => setJitter(Number(e.target.value) || 0)}
+          />
+        </label>
         <label className={`mini ${hazardActive ? "" : "dim"}`} title={hazardActive ? "raw hazard in use" : "expected failures in use"}>
           <span>expected failures / run</span>
           <input

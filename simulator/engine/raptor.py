@@ -10,6 +10,9 @@ First-principles but deliberately approximate:
   - Thrust:  F = mdot * ve + (P_e - P_a) * A_e
   - Throttling is modelled as a first-order lag of chamber pressure toward
     the demanded value (Raptor throttles from roughly 40% to 100%+).
+  - Optional natural high-frequency jitter (``noise_frac``): per-step zero-mean
+    Gaussian perturbation of chamber pressure and expansion efficiency, so
+    mdot / Pe / Isp / thrust all breathe together like a real engine burning.
   - Optional finite propellant load: the engine cuts off when the limiting
     component runs dry.
 
@@ -22,6 +25,7 @@ interact.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from functools import cache
 
@@ -57,6 +61,11 @@ class RaptorEngine:
     # dynamics / load
     throttle_time_constant: float = 0.5  # s, first-order chamber-pressure lag
     propellant_mass: float = 0.0         # kg, 0 = unlimited reservoir
+
+    # natural high-frequency jitter (combustion acoustics / feed turbulence):
+    # per-step zero-mean Gaussian perturbation, fraction of the nominal value
+    # (e.g. 0.02 = 2 % rms on chamber pressure; scales the derived flows/thrust)
+    noise_frac: float = 0.0
 
     @property
     def exit_area(self) -> float:
@@ -99,6 +108,8 @@ class RaptorEngine:
             raise ValueError("throttle_time_constant must be >= 0")
         if self.propellant_mass < 0:
             raise ValueError("propellant_mass must be >= 0")
+        if not 0.0 <= self.noise_frac <= 0.05:
+            raise ValueError(f"noise_frac must be in [0, 0.05], got {self.noise_frac}")
         for n, v in (("cstar_efficiency", self.cstar_efficiency),
                      ("thrust_efficiency", self.thrust_efficiency)):
             if not 0.0 < v <= 1.5:
@@ -114,8 +125,12 @@ class EngineState:
     fuel_mass: float = 0.0            # kg CH4 remaining (0 with unlimited load)
 
     def __init__(self, engine: RaptorEngine,
-                 ox_mass: float | None = None, fuel_mass: float | None = None) -> None:
+                 ox_mass: float | None = None, fuel_mass: float | None = None,
+                 seed: int | str | None = None) -> None:
         self.chamber_pressure = 0.0
+        # independent high-frequency noise stream, reproducible for a given
+        # seed (distinct engine instances draw distinct streams)
+        self._noise_rng = random.Random(seed)
         if engine.propellant_mass > 0:
             frac_ox = engine.mixture_ratio / (1.0 + engine.mixture_ratio)
             self.ox_mass = ox_mass if ox_mass is not None else engine.propellant_mass * frac_ox
@@ -222,8 +237,21 @@ def step(engine: RaptorEngine, state: EngineState,
 
     # first-order chamber tracking, then consume propellant at actual flow
     state.chamber_pressure += (target - state.chamber_pressure) * dt / tau
+
+    # natural high-frequency jitter (combustion acoustics / feed turbulence):
+    # zero-mean white noise on chamber pressure + a smaller independent
+    # efficiency wobble. The choked-flow relation carries the pressure jitter
+    # into mdot and Pe, so the whole output breathes together like a real
+    # engine; ``noise_frac = 0`` reproduces the deterministic baseline.
+    pc = state.chamber_pressure
+    gain = 1.0
+    if eng.noise_frac > 0.0 and not cutoff:
+        g = state._noise_rng.gauss(0.0, eng.noise_frac)
+        pc = max(pc * (1.0 + g), 0.0)
+        gain = 1.0 + state._noise_rng.gauss(0.0, 0.5 * eng.noise_frac)
+
     model = _get_model(eng)
-    mdot, pe, ve = model.statics(state.chamber_pressure)
+    mdot, pe, ve = model.statics(pc)
 
     if loaded and mdot > 0.0:
         frac_ox = eng.mixture_ratio / (1.0 + eng.mixture_ratio)
@@ -242,9 +270,9 @@ def step(engine: RaptorEngine, state: EngineState,
         state.ox_mass = max(0.0, new_ox) if new_ox > eps else 0.0
         state.fuel_mass = max(0.0, new_fuel) if new_fuel > eps else 0.0
         mdot_consumed = (d_ox + d_fuel) / dt
-        thrust = mdot_consumed * ve + (pe - ambient_pressure) * eng.exit_area
+        thrust = mdot_consumed * ve * gain + (pe - ambient_pressure) * eng.exit_area
     else:
-        thrust = mdot * ve + (pe - ambient_pressure) * eng.exit_area
+        thrust = mdot * ve * gain + (pe - ambient_pressure) * eng.exit_area
 
     return EngineOutput(
         t=t,

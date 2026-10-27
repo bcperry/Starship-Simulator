@@ -63,3 +63,55 @@ def test_invalid_parameters_raise():
             pass
         else:
             raise AssertionError(f"{kw[0]}={kw[1]} should raise")
+
+
+# -- natural high-frequency output jitter -----------------------------------
+
+def _steady(eng: RaptorEngine, seed, n: int = 300, dt: float = 0.01):
+    st = EngineState(eng, seed=seed)
+    return [step(eng, st, throttle=1.0, dt=dt, t=i * dt) for i in range(n)]
+
+
+def test_noise_frac_jitters_outputs_around_nominal():
+    eng = RaptorEngine(throttle_time_constant=0.05, noise_frac=0.02)
+    out = _steady(eng, seed=7)
+    warm = out[100:]
+    thrust = [o.thrust for o in warm]
+    mean = sum(thrust) / len(thrust)
+    std = (sum((x - mean) ** 2 for x in thrust) / len(thrust)) ** 0.5
+    # 2 % chamber-pressure jitter -> thrust breathes at roughly that level
+    assert 0.008 < std / mean < 0.045
+    # zero-mean: the noise does not bias the operating point
+    nominal = RaptorEngine(throttle_time_constant=0.05)
+    nref = _steady(nominal, seed=0)[100:]
+    nmean = sum(o.thrust for o in nref) / len(nref)
+    assert abs(mean - nmean) / nmean < 0.01
+
+
+def test_noise_is_deterministic_per_seed_and_independent_between_engines():
+    eng = RaptorEngine(throttle_time_constant=0.05, noise_frac=0.02)
+    a1 = [o.thrust for o in _steady(eng, seed=41)]
+    a2 = [o.thrust for o in _steady(eng, seed=41)]
+    b2 = [o.thrust for o in _steady(eng, seed=17)]
+    assert a1 == a2                                  # same seed: reproducible stream
+    assert a1 != b2                                  # different seed: different draw
+    mean = sum(a1[100:]) / 100
+    spread = max(a1[100:]) - min(a1[100:])
+    assert spread > 0.01 * mean                      # it actually wobbles
+
+
+def test_noise_frac_zero_is_deterministic_baseline():
+    eng = RaptorEngine(throttle_time_constant=0.05, noise_frac=0.0)
+    a = [o.thrust for o in _steady(eng, seed=9, n=400)]
+    b = [o.thrust for o in _steady(eng, seed=9, n=400)]
+    assert a == b
+    tail = a[300:]                                    # converged: flat, no wobble
+    assert max(tail) - min(tail) < 1e-6 * max(tail)
+
+
+def test_noise_frac_out_of_range_rejected():
+    import pytest
+    with pytest.raises(ValueError):
+        RaptorEngine(noise_frac=-0.01)
+    with pytest.raises(ValueError):
+        RaptorEngine(noise_frac=0.1)

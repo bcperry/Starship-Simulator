@@ -254,6 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "the ship calibrates a per-engine constant hazard rate from this)")
     p.add_argument("--fail-hazard", type=float, default=None,
                    help="per-engine failure hazard rate lambda (1/s); overrides --failures-per-run")
+    p.add_argument("--noise", type=float, default=0.02,
+                   help="natural high-frequency jitter: per-step zero-mean Gaussian, as a fraction "
+                        "of the nominal value, on chamber pressure (default 0.02 = 2 % rms; 0 = deterministic)")
     p.add_argument("--lox-kg", type=float, default=5_480_000.0, help="shared LOX tank load, kg")
     p.add_argument("--ch4-kg", type=float, default=1_520_000.0, help="shared CH4 tank load, kg")
     p.add_argument("--throttle", type=float, default=1.0, help="commanded throttle 0..1.5")
@@ -298,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
             dt=args.dt,
             expected_failures_per_run=args.failures_per_run,
             fail_hazard_per_s=args.fail_hazard,
+            noise_frac=args.noise,
         )
     )
     if args.bootstrap:
