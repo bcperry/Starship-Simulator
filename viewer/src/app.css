@@ -281,3 +281,50 @@ footer.foot a { color: var(--ink-3); }
   color: var(--amber);
   font-weight: 600;
 }
+
+/* -- engine bank chip (VAC vs sea-level) ------------------------------------ */
+.bank {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
+  padding: 1px 6px; border-radius: 5px; border: 1px solid;
+}
+.bank.vac { color: var(--cyan); border-color: rgba(79,214,255,0.4); background: rgba(79,214,255,0.1); }
+.bank.sl  { color: var(--amber); border-color: rgba(255,190,74,0.4); background: rgba(255,190,74,0.1); }
+
+/* -- full-stack phase bar ---------------------------------------------------- */
+.phasebar {
+  display: grid; grid-template-columns: auto auto auto 1fr auto auto; align-items: center;
+  gap: 12px; margin: 0 0 14px; padding: 10px 14px;
+  border: 1px solid var(--panel-line); border-radius: 12px; background: var(--panel);
+}
+@keyframes phasepulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(55,225,168,0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(55,225,168,0.12); }
+}
+.phasebadge {
+  font-size: 12px; font-weight: 800; letter-spacing: 0.14em; padding: 5px 12px; border-radius: 999px;
+  color: var(--ink-2); background: rgba(91,107,130,0.18);
+}
+.phasebadge.liftoff { color: var(--accent); background: rgba(55,225,168,0.14); animation: phasepulse 1.8s infinite; }
+.phasebadge.staging { color: var(--amber);  background: rgba(255,190,74,0.14); }
+.phasebadge.upper   { color: var(--cyan);   background: rgba(79,214,255,0.12); animation: phasepulse 1.8s infinite; }
+.phasebadge.done    { color: var(--ink-3);  background: rgba(91,107,130,0.12); }
+.phasetime { font-size: 12px; color: var(--ink-2); }
+.staging { font-size: 11px; }
+.phasespacer { display: none; }
+.stg {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-radius: 9px; border: 1px solid var(--panel-line);
+  background: var(--panel-2);
+}
+.stg.on { border-color: rgba(55,225,168,0.5); background: rgba(55,225,168,0.06); }
+.stglabel { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; color: var(--ink-2); }
+.stgtag { font-size: 9px; letter-spacing: 0.08em; color: var(--ink-3); }
+.stg.on .stgtag { color: var(--accent); }
+.stg.meco .stgtag { color: var(--amber); }
+.stgtrack { width: 84px; height: 5px; border-radius: 999px; background: rgba(91,107,130,0.25); overflow: hidden; }
+.stgfill { display: block; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); }
+.stgtank { font-size: 10px; color: var(--ink-2); min-width: 34px; text-align: right; }
+@media (max-width: 900px) {
+  .phasebar { grid-template-columns: 1fr; }
+  .stgtrack { flex: 1; }
+}

@@ -333,3 +333,27 @@ def summary(engine: RaptorEngine, sl: EngineOutput | None = None,
                 f"Pe={o.exit_pressure / 1e5 * 100:8.2f} kPa"
             )
     return "\n".join(lines)
+
+
+# -- vehicle presets ---------------------------------------------------------
+# Same physics, different hardware: the presets only change geometry /
+# efficiency so one Raptor sim backs every engine on the full stack.
+
+#: Sea-level Raptor (Super Heavy's 33, and Starship's three sea-level
+#: engines). ~1.96 MN vacuum, Isp_vac ~351 s, 568 kg/s at 100 %.
+#: (Raptor 2 spec: 2.00–2.4 MN / ~327–358 s — this model sits in band.)
+def raptor_v2() -> RaptorEngine:
+    return RaptorEngine(name="Raptor V2 (SL)")
+
+
+#: Raptor Vacuum: vacuum-optimised high-expansion nozzle (A_e/A_t ≈ 171,
+#: ~6.7 m^2 exit). ~2.57 MN vacuum, Isp_vac ≈ 376 s, 698 kg/s at 100 % —
+#: in band with the published Raptor V (2.51–2.8 MN / ~380 s). Note the
+#: sea-level penalty: over-expanded, it loses ~30 % of its vacuum thrust.
+def raptor_vacuum() -> RaptorEngine:
+    return RaptorEngine(
+        name="Raptor Vacuum",
+        throat_area=0.043,
+        nozzle_area_ratio=171.0,
+        thrust_efficiency=1.02,
+    )

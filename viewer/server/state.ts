@@ -8,6 +8,7 @@ import {
   FeedEvent,
   LineSummary,
   ShipStatusMessage,
+  StackStatusMessage,
   TelemetryMessage,
 } from "../shared/types.js";
 import type { Source } from "./sources.js";
@@ -24,7 +25,9 @@ interface Subscriber {
 export class FeedStore {
   latestTel = new Map<string, Held>();
   latestCmd = new Map<string, Held>();
-  ship: ShipStatusMessage | null = null;
+  ship: ShipStatusMessage | null = null; // newest (any vessel) ship.status
+  ships = new Map<string, ShipStatusMessage>(); // per-vehicle (stack mode)
+  stack: StackStatusMessage | null = null;
   summaries: LineSummary[] = [];
   counts = { command: 0, telemetry: 0, ship: 0 };
 
@@ -37,7 +40,10 @@ export class FeedStore {
   ingest(ev: FeedEvent): void {
     if (ev.kind === "ship") {
       this.ship = ev.message;
+      this.ships.set(ev.message.vehicle_id, ev.message);
       this.counts.ship += 1;
+    } else if (ev.kind === "stack") {
+      this.stack = ev.message;
     } else if (ev.kind === "command") {
       this.latestCmd.set(ev.message.engine_id, {
         lineSummary: ev.lineSummary,
@@ -71,6 +77,8 @@ export class FeedStore {
     return {
       latest,
       ship: this.ship,
+      ships: Object.fromEntries(this.ships),
+      stack: this.stack,
       lines: this.summaries.slice(-40),
       counts: { ...this.counts, engines: this.engineCount() },
       ts_ms: Date.now(),

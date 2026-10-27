@@ -34,7 +34,7 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = process.env.REPO_ROOT ?? path.resolve(here, "..", "..");
 
-export type SourceKind = "mock" | "kafka";
+export type SourceKind = "mock" | "kafka" | "stack";
 
 export interface Source {
   start(onEvent: (ev: FeedEvent) => void): void;
@@ -57,18 +57,29 @@ export class ShipProcessSource implements Source {
   private lastAck: ShipAck | null = null;
   private ackWaiters: Array<{ command: string; resolve: (ack: ShipAck) => void }> = [];
   private args: string[];
+  private module = "simulator.shiploop";
   private dead = false;
 
-  constructor(cfg: { vehicleId: string; speed?: number; emitEvery?: number }) {
-    const a = [
-      "--vehicle-id", cfg.vehicleId,
-      "--engines", "33",
-      "--dt", "0.01",
-      "--speed", String(cfg.speed ?? 1),
-      "--emit-every", String(cfg.emitEvery ?? 2),
-      "--log-every", "0", // silence the console status lines under the viewer
-    ];
+  constructor(cfg: { vehicleId: string; speed?: number; emitEvery?: number; stack?: boolean }) {
+    const a = cfg.stack
+      ? [
+          // full stack: Super Heavy (33) + Starship (3x VAC + 3x SL)
+          "--seed", "7",
+          "--dt", "0.01",
+          "--speed", String(cfg.speed ?? 1),
+          "--emit-every", String(cfg.emitEvery ?? 2),
+          "--log-every", "0", // silence the console status lines under the viewer
+        ]
+      : [
+          "--vehicle-id", cfg.vehicleId,
+          "--engines", "33",
+          "--dt", "0.01",
+          "--speed", String(cfg.speed ?? 1),
+          "--emit-every", String(cfg.emitEvery ?? 2),
+          "--log-every", "0", // silence the console status lines under the viewer
+        ];
     this.args = a;
+    this.module = cfg.stack ? "simulator.stackloop" : "simulator.shiploop";
   }
 
   private spawnChild(onEvent: (ev: FeedEvent) => void): void {
@@ -80,8 +91,8 @@ export class ShipProcessSource implements Source {
     const py = process.env.SHIP_PYTHON_BIN ?? (fs.existsSync(venvPy) ? venvPy : "uv");
     const isUv = path.basename(py) === "uv";
     const args = isUv
-      ? ["run", "python", "-m", "simulator.shiploop", ...this.args]
-      : ["-m", "simulator.shiploop", ...this.args];
+      ? ["run", "python", "-m", this.module, ...this.args]
+      : ["-m", this.module, ...this.args];
     const proc = spawn(py, args, { cwd: REPO_ROOT, stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
     proc.stdout?.setEncoding("utf8");
@@ -211,6 +222,17 @@ function mockToFeedEvent(doc: any): FeedEvent | null {
       seq: msg.seq,
     };
     return { kind: "ship", message: msg, lineSummary: line };
+  }
+  if (doc?.type === "stack.status") {
+    const msg = doc;   // StackStatusMessage (shared/types)
+    const line: LineSummary = {
+      kind: "stack",
+      t: msg.t,
+      summary: `stack ${msg.phase} active=${msg.active_vehicle ?? "-"} tank ${((msg.tank?.frac ?? 0) * 100).toFixed(1)}%`,
+      engine_id: "stack",
+      seq: 0,
+    };
+    return { kind: "stack", message: msg, lineSummary: line };
   }
   return null;
 }
@@ -376,5 +398,6 @@ export function makeSource(kind: SourceKind, opts: Record<string, string | undef
     vehicleId: process.env.VEHICLE_ID ?? "starship",
     speed: process.env.SHIP_SPEED ? Number(process.env.SHIP_SPEED) : undefined,
     emitEvery: process.env.SHIP_EMIT_EVERY ? Number(process.env.SHIP_EMIT_EVERY) : undefined,
+    stack: kind === "stack",
   });
 }

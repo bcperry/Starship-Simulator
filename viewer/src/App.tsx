@@ -10,6 +10,7 @@ import { FlameIcon, PauseIcon, PlayIcon, RocketIcon } from "./components/Icons";
 import { FleetBoard } from "./components/FleetBoard";
 import { MessageFeed } from "./components/MessageFeed";
 import { Panel } from "./components/Panel";
+import { PhaseBar } from "./components/PhaseBar";
 import { ShipPanel } from "./components/ShipPanel";
 import { TrendChart } from "./components/TrendChart";
 import { fleetSummary } from "./lib/aggregate";
@@ -73,18 +74,36 @@ export default function App() {
         </div>
       </header>
 
+      {snapshot.stack && <PhaseBar stack={snapshot.stack} />}
+
       <div className="grid">
         <div className="col">
-          <Panel title="Run control" hint="new run · throttle · MECO — drives the ship sim">
-            <ControlPanel ship={snapshot.ship} vehicleId={`starship`} />
+          <Panel title="Run control" hint={snapshot.stack ? "new run · throttle · cut active stage — drives the stack" : "new run · throttle · MECO — drives the ship sim"}>
+            <ControlPanel ship={snapshot.ship} vehicleId={`starship`} stackMode={!!snapshot.stack} />
           </Panel>
 
-          <Panel title="Ship — shared propellant" hint="one LOX + one CH₄ tank feeds every engine"
-            right={<span className={`${snapshot.ship.ship?.meco ? "dim" : "livepill"}`}>
-              {snapshot.ship.ship ? (snapshot.ship.ship.meco ? "MECO" : "burning") : "standby"}
-            </span>}>
-            <ShipPanel ship={snapshot.ship} />
-          </Panel>
+          {!snapshot.stack && (
+            <Panel title="Ship — shared propellant" hint="one LOX + one CH₄ tank feeds every engine"
+              right={<span className={`${snapshot.ship.ship?.meco ? "dim" : "livepill"}`}>
+                {snapshot.ship.ship ? (snapshot.ship.ship.meco ? "MECO" : "burning") : "standby"}
+              </span>}>
+              <ShipPanel ship={snapshot.ship} />
+            </Panel>
+          )}
+
+          {snapshot.stack &&
+            Object.values(snapshot.ships).map((view) => {
+              const vid = view.ship?.vehicle_id ?? "stage";
+              const label = vid === "starship" ? "Starship — upper stage" : vid === "super-heavy" ? "Super Heavy — first stage" : vid;
+              return (
+                <Panel key={vid} title={label} hint="own tank · 6× Raptor (3 VAC + 3 SL)"
+                  right={<span className={`${view.ship?.meco ? "dim" : "livepill"}`}>
+                    {view.ship ? (view.ship.meco ? "MECO" : "burning") : "standby"}
+                  </span>}>
+                  <ShipPanel ship={view} />
+                </Panel>
+              );
+            })}
 
           <Panel title="Fleet status" hint="derived from latest per-engine telemetry"
             right={<span className={`${summary.any_cut ? "" : "dim"} small`}>

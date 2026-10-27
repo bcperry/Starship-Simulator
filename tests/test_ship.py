@@ -486,3 +486,89 @@ def test_ship_jitter_is_deterministic_per_run_and_retunable():
         validate_ship_control(to_ship_control("start_run", noise_frac=0.1))
     with pytest.raises(ValueError):
         validate_ship_control(to_ship_control("start_run", noise_frac=-0.01))
+
+
+# -- Starship (upper stage): mixed Raptor Vacuum + sea-level banks ---------
+def _ss_cfg(**kw) -> dict:
+    base = {
+        "vehicle_id": "starship", "n_engines": 6, "engine_prefix": "ss", "seed": 7,
+        "vari_frac": 0.0, "tank_ox_kg": 40_000.0, "tank_ch4_kg": 12_000.0,
+        "dt": 0.02, "expected_failures_per_run": 0.0,
+    }
+    base.update(kw)
+    return base
+
+
+def test_starship_has_mixed_vac_and_sl_banks():
+    from simulator.starship import Starship
+
+    cfg = _ss_cfg(expected_failures_per_run=0.0)
+    from simulator.ship import ShipConfig
+
+    ss = Starship(ShipConfig(**cfg))
+    banks = [(m.engine_id, m.bank) for m in ss._members]
+    assert banks == [
+        ("ss-01", "vac"), ("ss-02", "vac"), ("ss-03", "vac"),
+        ("ss-04", "sl"), ("ss-05", "sl"), ("ss-06", "sl"),
+    ]
+    docs = ss.step()
+    tels = [d for d in docs if d["type"] == ENGINE_TELEMETRY]
+    for t in tels:
+        if t["engine_id"] <= "ss-03":
+            assert t["bank"] == "vac"
+        else:
+            assert t["bank"] == "sl"
+    st = next(d for d in docs if d["type"] == SHIP_STATUS)
+    assert st["vehicle_id"] == "starship" and st["n_engines"] == 6
+
+
+def test_starship_vac_engines_outperform_sl_at_high_altitude():
+    """Vacuum-optimised engines win where the air is thin; both share the tank."""
+    from simulator.engine import EngineState, step
+    from simulator.engine.raptor import raptor_vacuum
+    from simulator.ship import ShipConfig
+    from simulator.starship import Starship
+
+    # engine-level: Raptor Vacuum is bigger-nozeled and vacuum-optimised.
+    vac = raptor_vacuum()
+    sl = RaptorEngine(throttle_time_constant=0.25)
+    assert vac.nozzle_area_ratio > sl.nozzle_area_ratio  # much bigger expansion
+    # in space the vacuum engine has the higher Isp (its advantage shows)
+    ov = step(vac, EngineState(vac, seed=3), 1.0, ambient_pressure=0.0, dt=0.01)
+    os_ = step(sl, EngineState(sl, seed=3), 1.0, ambient_pressure=0.0, dt=0.01)
+    assert ov.isp > os_.isp, "Raptor V should beat SL in vacuum"
+    # ... but at sea level it over-expands and loses Isp to the SL engine
+    ov = step(vac, EngineState(vac, seed=3), 1.0, ambient_pressure=101_325.0, dt=0.01)
+    os_ = step(sl, EngineState(sl, seed=3), 1.0, ambient_pressure=101_325.0, dt=0.01)
+    assert ov.isp < os_.isp, "Raptor V should lose Isp to SL at sea level"
+
+    ss = Starship(ShipConfig(**_ss_cfg(expected_failures_per_run=0.0, seed=9)))
+    ss.step()  # tanks drain from ONE shared tank
+    assert ss.tank_ox_kg < 40_000.0
+
+
+def test_starship_full_burn_completes_and_respects_expectation():
+    from simulator.ship import ShipConfig
+    from simulator.starship import Starship
+
+    def _mk(seed: int) -> Starship:
+        return Starship(
+            ShipConfig(
+                vehicle_id="starship", n_engines=6, engine_prefix="ss", seed=seed,
+                vari_frac=0.0, tank_ox_kg=24_000.0, tank_ch4_kg=8_000.0, dt=0.1,
+                expected_failures_per_run=1.0, noise_frac=0.0,
+            )
+        )
+
+    ship = _run_to_meco(_mk(5))
+    st = ship.status()
+    assert st["n_engines"] == 6
+    # with expected=1 on 6 engines over the full burn, ~50 % of runs fail one
+    # engine -- run a few and require at least one has, none more than 3
+    saw = [_mk(s) for s in range(1, 9)]
+    for s in saw:
+        _run_to_meco(s)
+    nfail = sum(1 for s in saw if any(m.failed for m in s._members))
+    assert nfail >= 1, "expectation 1.0 on 6 engines should produce failures in most runs"
+    for s in saw:
+        assert sum(1 for m in s._members if m.failed) <= 3, "no more than 3 failures per burn"

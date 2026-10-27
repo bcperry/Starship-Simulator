@@ -148,6 +148,19 @@ class ShipConfig:
             raise ValueError(f"noise_frac must be in [0, 0.05], got {self.noise_frac}")
 
 
+@dataclass(frozen=True)
+class EngineGroup:
+    """One bank of identical engines on a vessel.
+
+    ``bank`` tags the telemetry (e.g. ``"vac"`` / ``"sl"`` on Starship);
+    ``None`` leaves it off (Super Heavy). Same Raptor sim, different params.
+    """
+
+    base: RaptorEngine
+    count: int
+    bank: str | None = None
+
+
 def make_engine(
     base: RaptorEngine, engine_index: int, vehicle_id: str, seed: int, vari_frac: float
 ) -> RaptorEngine:
@@ -179,9 +192,11 @@ class _Member:
     """One engine slot on the ship: identity + model + its state."""
 
     def __init__(self, engine_id: str, engine: RaptorEngine,
-                 noise_seed: str | int | None = None) -> None:
+                 noise_seed: str | int | None = None,
+                 bank: str | None = None) -> None:
         self.engine_id = engine_id
         self.engine = engine
+        self.bank = bank
         # each engine draws its own reproducible high-frequency noise stream
         self.state = EngineState(engine, seed=f"starship|noise|{noise_seed}")
         self.failed = False
@@ -200,10 +215,17 @@ class Ship:
         self,
         config: ShipConfig | None = None,
         base_engine: RaptorEngine | None = None,
+        groups: tuple[EngineGroup, ...] | None = None,
     ) -> None:
         self.config = config or ShipConfig()
-        self._base = base_engine or RaptorEngine(
-            throttle_time_constant=0.25, noise_frac=self.config.noise_frac
+        self._groups: tuple[EngineGroup, ...] | None = tuple(groups) if groups else None
+        self._base = (
+            self._groups[0].base
+            if self._groups
+            else (
+                base_engine
+                or RaptorEngine(throttle_time_constant=0.25, noise_frac=self.config.noise_frac)
+            )
         )
         self.seed = self.config.seed
         self.vari_frac = self.config.vari_frac
@@ -254,7 +276,16 @@ class Ship:
 
         if not 0.0 <= vari_frac <= 0.5:
             raise ValueError(f"vari_frac must be in [0, 0.5], got {vari_frac}")
-        if n_engines < 1:
+        if self._groups is not None:
+            fleet_size = sum(int(g.count) for g in self._groups)
+            if fleet_size < 1:
+                raise ValueError("engine groups must define at least one engine")
+            if n_engines is not None and int(n_engines) != fleet_size:
+                raise ValueError(
+                    "engine groups define the fleet size "
+                    f"({fleet_size}); n_engines={n_engines} does not match"
+                )
+        elif n_engines < 1:
             raise ValueError(f"n_engines must be >= 1, got {n_engines}")
         if tank_ox_kg < 0.0 or tank_ch4_kg < 0.0:
             raise ValueError("tank masses must be >= 0")
@@ -265,8 +296,14 @@ class Ship:
         if noise_frac is not None and not 0.0 <= float(noise_frac) <= 0.05:
             raise ValueError(f"noise_frac must be in [0, 0.05], got {noise_frac}")
         if noise_frac is not None and self._base is not None:
-            # live retune for runs started via the control path
-            self._base = dataclasses.replace(self._base, noise_frac=float(noise_frac))
+            # live retune for runs started via the control path (every bank)
+            nf = float(noise_frac)
+            self._base = dataclasses.replace(self._base, noise_frac=nf)
+            if self._groups is not None:
+                self._groups = tuple(
+                    dataclasses.replace(g, base=dataclasses.replace(g.base, noise_frac=nf))
+                    for g in self._groups
+                )
 
         self.config = dataclasses.replace(
             self.config,
@@ -281,14 +318,27 @@ class Ship:
         )
         self.seed = seed
         self.vari_frac = vari_frac
-        self._members = [
-            _Member(
-                engine_id=f"{self.config.engine_prefix}-{i + 1:02d}",
-                engine=make_engine(self._base, i, self.config.vehicle_id, seed, vari_frac),
-                noise_seed=f"{self.config.vehicle_id}|{seed}|{i}",
-            )
-            for i in range(n_engines)
-        ]
+        # build the fleet: one or more homogeneous banks (Starship mixes
+        # Raptor Vacuum + sea-level Raptors on the same engine sim)
+        if self._groups is not None:
+            spec: list[tuple[RaptorEngine, int, str | None]] = [
+                (g.base, int(g.count), g.bank) for g in self._groups
+            ]
+        else:
+            spec = [(self._base, int(n_engines), None)]
+        self._members: list[_Member] = []
+        idx = 0
+        for base_bank, count, bank in spec:
+            for _ in range(count):
+                self._members.append(
+                    _Member(
+                        engine_id=f"{self.config.engine_prefix}-{idx + 1:02d}",
+                        engine=make_engine(base_bank, idx, self.config.vehicle_id, seed, vari_frac),
+                        noise_seed=f"{self.config.vehicle_id}|{seed}|{idx}",
+                        bank=bank,
+                    )
+                )
+                idx += 1
         self.tank_ox_kg = tank_ox_kg
         self.tank_ch4_kg = tank_ch4_kg
         self.tank_ox0_kg = tank_ox_kg
@@ -301,17 +351,21 @@ class Ship:
         # per-engine failure hazard for this launch (constant hazard /
         # exponential time-to-failure) + deterministic roll stream; re-drawn
         # for every new run so each launch gets a fresh failure profile
-        self._fail_lambda = self._fail_hazard(n_engines, tank_ox_kg + tank_ch4_kg)
+        self._fail_lambda = self._fail_hazard(len(self._members), tank_ox_kg + tank_ch4_kg)
         self._fail_rng = random.Random(f"{self.config.vehicle_id}|{seed}|ttf")
         return self.run_id
 
     def _nominal_burn_s(self, tank_total_kg: float) -> float:
-        """Seconds for the whole fleet to consume ``tank_total_kg`` at 100% throttle (nominal engine)."""
-        eng = self._base
-        if eng is None or tank_total_kg <= 0.0 or not self._members:
+        """Seconds for the whole fleet to consume ``tank_total_kg`` at 100% throttle (nominal engines)."""
+        if tank_total_kg <= 0.0 or not self._members:
             return 0.0
-        mdot_full = eng.cstar_efficiency * eng.specific_mass_flow * eng.chamber_pressure
-        fleet_mdot = mdot_full * len(self._members)
+        # nominal (un-jittered) flow per bank: base engine x count -- must stay
+        # independent of the per-engine starting-condition spread, or the
+        # failure-hazard calibration would wobble with the run seed
+        if self._groups is not None:
+            fleet_mdot = sum(g.base.max_mass_flow * g.count for g in self._groups)
+        else:
+            fleet_mdot = self._base.max_mass_flow * len(self._members)
         return tank_total_kg / fleet_mdot if fleet_mdot > 0.0 else 0.0
 
     def _fail_hazard(self, n_engines: int, tank_total_kg: float) -> float:
@@ -503,6 +557,7 @@ class Ship:
                     "throttle_demand_frac": 0.0 if member.failed else eff_cmd,
                     "ambient_pressure_pa": self.config.ambient_pressure_pa,
                     "run_id": self.run_id,
+                    **({"bank": member.bank} if member.bank else {}),
                 }
             )
             tel = {
@@ -516,6 +571,8 @@ class Ship:
                 "run_id": self.run_id,
             }
             tel["state"] = state
+            if member.bank:
+                tel["bank"] = member.bank
             docs.append(tel)
 
         # fleet totals count only live engines (failed engines contribute

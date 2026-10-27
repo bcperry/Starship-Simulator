@@ -23,6 +23,11 @@ export function EngineCard({ v }: { v: EngineView }) {
     <div className="card" style={stale ? { opacity: 0.55 } : undefined}>
       <div className="top">
         <span className="id">{v.id}</span>
+        {m?.bank && (
+          <span className={`bank ${m.bank}`} title={m.bank === "vac" ? "Raptor Vacuum" : "Raptor sea-level"}>
+            {m.bank === "vac" ? "VAC" : "SL"}
+          </span>
+        )}
         <span className={`state ${meta.cls}`}>{meta.label}</span>
       </div>
 

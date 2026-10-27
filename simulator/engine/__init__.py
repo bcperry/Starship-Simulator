@@ -5,9 +5,21 @@ from .raptor import (
     EngineOutput,
     EngineState,
     RaptorEngine,
+    raptor_v2,
+    raptor_vacuum,
     run,
     step,
     summary,
 )
 
-__all__ = ["G0", "EngineOutput", "EngineState", "RaptorEngine", "run", "step", "summary"]
+__all__ = [
+    "G0",
+    "EngineOutput",
+    "EngineState",
+    "RaptorEngine",
+    "raptor_v2",
+    "raptor_vacuum",
+    "run",
+    "step",
+    "summary",
+]

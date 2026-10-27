@@ -10,14 +10,16 @@ import { Panel } from "./Panel";
 interface Props {
   ship: ShipView;
   vehicleId: string;
+  stackMode?: boolean; // full-stack feed: per-stage failure expectations
 }
 
-export function ControlPanel({ ship, vehicleId }: Props) {
+export function ControlPanel({ ship, vehicleId, stackMode = false }: Props) {
   const [throttle, setThrottle] = useState<number>(100);
   const [seed, setSeed] = useState("");
   const [nEngines, setNEngines] = useState(33);
   const [vari, setVari] = useState(1);
   const [failures, setFailures] = useState<number>(2);
+  const [ssFailures, setSsFailures] = useState<number>(1);
   const [hazard, setHazard] = useState("");
   const [jitter, setJitter] = useState<number>(2);
 
@@ -51,6 +53,12 @@ export function ControlPanel({ ship, vehicleId }: Props) {
               ch4_kg: 1_520_000,
               throttle_frac: throttle / 100,
               expected_failures_per_run: Math.max(0, failures),
+              ...(stackMode
+                ? {
+                    sh_expected_failures: Math.max(0, failures),
+                    ss_expected_failures: Math.max(0, ssFailures),
+                  }
+                : {}),
               // 0 = clear any raw-hazard override, so the expectation drives the model
               fail_hazard_per_s: hz > 0 ? hz : 0.0,
               noise_frac: Math.min(5, Math.max(0, jitter)) / 100,
@@ -131,17 +139,44 @@ export function ControlPanel({ ship, vehicleId }: Props) {
             onChange={(e) => setJitter(Number(e.target.value) || 0)}
           />
         </label>
-        <label className={`mini ${hazardActive ? "" : "dim"}`} title={hazardActive ? "raw hazard in use" : "expected failures in use"}>
-          <span>expected failures / run</span>
-          <input
-            type="number"
-            min={0}
-            step={0.5}
-            value={failures}
-            disabled={hazardActive}
-            onChange={(e) => setFailures(Number(e.target.value) || 0)}
-          />
-        </label>
+        {stackMode ? (
+          <>
+            <label className={`mini ${hazardActive ? "" : "dim"}`} title="expected random failures in the Super Heavy burn (33 engines)">
+              <span>failures &middot; Super Heavy</span>
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={failures}
+                disabled={hazardActive}
+                onChange={(e) => setFailures(Number(e.target.value) || 0)}
+              />
+            </label>
+            <label className={`mini ${hazardActive ? "" : "dim"}`} title="expected random failures in the Starship burn (6 engines)">
+              <span>failures &middot; Starship</span>
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={ssFailures}
+                disabled={hazardActive}
+                onChange={(e) => setSsFailures(Number(e.target.value) || 0)}
+              />
+            </label>
+          </>
+        ) : (
+          <label className={`mini ${hazardActive ? "" : "dim"}`} title={hazardActive ? "raw hazard in use" : "expected failures in use"}>
+            <span>expected failures / run</span>
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={failures}
+              disabled={hazardActive}
+              onChange={(e) => setFailures(Number(e.target.value) || 0)}
+            />
+          </label>
+        )}
         <label className={`mini grow ${hazardActive ? "" : "dim"}`}>
           <span>raw hazard 1/s (empty = auto)</span>
           <input

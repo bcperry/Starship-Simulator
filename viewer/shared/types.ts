@@ -31,6 +31,7 @@ export interface TelemetryMessage {
   ambient_pressure_pa: number;
   command_seq: number;
   run_id?: string; // ship run this step belongs to (absent = standalone engine)
+  bank?: "vac" | "sl" | null; // engine bank on multi-bank vessels (Starship)
 }
 
 export interface CommandMessage {
@@ -45,6 +46,7 @@ export interface CommandMessage {
   ambient_pressure_pa: number;
   ts_ms: number;
   run_id?: string;
+  bank?: "vac" | "sl" | null;
 }
 
 export interface ShipTank {
@@ -89,7 +91,6 @@ export interface ShipStatusMessage {
 }
 
 export type ShipControlCommand = "start_run" | "throttle" | "meco";
-
 export interface ShipControlMessage {
   v: number;
   type: typeof SHIP_CONTROL;
@@ -108,6 +109,10 @@ export interface ShipControlMessage {
   fail_hazard_per_s?: number;
   /** natural high-frequency jitter fraction (0.004 = 0.4 % rms on chamber pressure) */
   noise_frac?: number;
+  /** full-stack control: expected failures in the Super Heavy burn */
+  sh_expected_failures?: number;
+  /** full-stack control: expected failures in the Starship burn */
+  ss_expected_failures?: number;
 }
 
 export interface ShipAck {
@@ -122,7 +127,7 @@ export interface ShipAck {
 }
 
 export interface LineSummary {
-  kind: "command" | "telemetry" | "ship";
+  kind: "command" | "telemetry" | "ship" | "stack";
   t: number;
   summary: string;
   engine_id: string;
@@ -131,7 +136,34 @@ export interface LineSummary {
   ts_ms?: number;
 }
 
+export type StackPhase = "liftoff" | "staging" | "upper" | "done";
+
+export interface StackVesselStatus {
+  vehicle_id: string;
+  run_id: string;
+  meco: boolean;
+  firing: number;
+  failed: number;
+  tank_frac: number;
+  ignited?: boolean;
+}
+
+export interface StackStatusMessage {
+  v: number;
+  type: "stack.status";
+  vehicle_id: string; // "stack"
+  t: number;
+  phase: StackPhase;
+  active_vehicle: string | null;
+  staging_in_s?: number | null;
+  sh: StackVesselStatus;
+  ss: StackVesselStatus;
+  tank: { frac: number; total_kg?: number };
+  meco?: boolean;
+}
+
 export type FeedEvent =
   | ({ kind: "command"; message: CommandMessage } & { lineSummary: LineSummary })
   | ({ kind: "telemetry"; message: TelemetryMessage } & { lineSummary: LineSummary })
-  | ({ kind: "ship"; message: ShipStatusMessage } & { lineSummary: LineSummary });
+  | ({ kind: "ship"; message: ShipStatusMessage } & { lineSummary: LineSummary })
+  | ({ kind: "stack"; message: StackStatusMessage } & { lineSummary: LineSummary });

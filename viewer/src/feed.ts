@@ -8,6 +8,7 @@ import type {
   LineSummary,
   ShipAck,
   ShipStatusMessage,
+  StackStatusMessage,
   TelemetryMessage,
 } from "@shared/types";
 
@@ -38,7 +39,7 @@ export interface FleetPoint extends FleetSummary {
   t: number;
 }
 
-export type FeedLineKind = "command" | "telemetry" | "ship";
+export type FeedLineKind = "command" | "telemetry" | "ship" | "stack";
 
 export interface FeedLine {
   id: string;
@@ -68,7 +69,9 @@ export interface Snapshot {
   fleet: FleetPoint[];
   lines: FeedLine[];
   counts: { command: number; telemetry: number; ship: number; engines: number };
-  ship: ShipView;
+  ship: ShipView; // the ACTIVE vessel (stack mode: follows the burning stage)
+  ships: Record<string, ShipView>; // per-vehicle (single-ship feeds: one key)
+  stack: StackStatusMessage | null; // full-stack phase state (stack feeds only)
   source: string | null;
   connected: boolean;
   lastEventMs: number;
@@ -83,6 +86,8 @@ interface ServerHeld {
 interface ServerSnapshot {
   latest: Record<string, { telemetry?: ServerHeld; command?: ServerHeld }>;
   ship: ShipStatusMessage | null;
+  ships?: Record<string, ShipStatusMessage>;
+  stack?: StackStatusMessage | null;
   lines: LineSummary[];
   counts: { command: number; telemetry: number; ship: number; engines: number };
   ts_ms: number;
@@ -97,6 +102,8 @@ class ClientFeed {
   private lines: FeedLine[] = [];
   private lineMap = new Map<string, FeedLine>();
   private ship: ShipView = { ship: null, history: [], lastAck: null };
+  private shipViews = new Map<string, ShipView>();
+  private stack: StackStatusMessage | null = null;
   private runId: string | null = null;
   private counts = { command: 0, telemetry: 0, ship: 0, engines: 0 };
   private source: string | null = null;
@@ -113,6 +120,8 @@ class ClientFeed {
     lines: [],
     counts: { command: 0, telemetry: 0, ship: 0, engines: 0 },
     ship: { ship: null, history: [], lastAck: null },
+    ships: {},
+    stack: null,
     source: null,
     connected: false,
     lastEventMs: 0,
@@ -215,15 +224,20 @@ class ClientFeed {
   private apply(snap: ServerSnapshot): void {
     this.lastEventMs = Date.now();
 
-    // A new ship run resets the board.
-    const rid = snap.ship?.run_id ?? null;
+    // A new ship run (or a new stack mission) resets the board.
+    const rid = snap.stack
+      ? snap.stack.sh.run_id + "|" + snap.stack.ss.run_id
+      : (snap.ship?.run_id ?? null);
     if (rid !== this.runId) {
       if (this.runId !== null || rid !== null) {
         this.engines.clear();
         this.fleet.length = 0;
         this.lineMap.clear();
         this.lines = [];
-        this.ship = { ...this.ship, ship: snap.ship, history: [] };
+        this.shipViews.clear();
+        this.lastShipSeq = 0;
+        this.ship = { ship: snap.ship, history: [], lastAck: null };
+        this.stack = snap.stack ?? null;
         this.counts = { ...snap.counts };
       }
       this.runId = rid;
@@ -265,8 +279,14 @@ class ClientFeed {
       if (!seen.has(id)) this.engines.delete(id);
     }
 
-    if (snap.ship) {
-      const s = snap.ship;
+    // per-vehicle ship views (stack feeds carry both stages; single feeds one)
+    const ships: Record<string, ShipStatusMessage> = Object.fromEntries(
+      Object.entries(
+        snap.ships ?? (snap.ship ? { [snap.ship.vehicle_id]: snap.ship } : {})
+      ) as Array<[string, ShipStatusMessage]>
+    );
+    for (const [vid, s] of Object.entries(ships ?? {})) {
+      const view = this.shipViews.get(vid) ?? { ship: s, history: [], lastAck: null };
       const point: ShipPoint = {
         t: s.t,
         thrust_n: s.thrust_n,
@@ -274,13 +294,20 @@ class ClientFeed {
         mdot_kg_s: s.mdot_kg_s?.total ?? 0,
         meco: s.meco,
       };
-      const last = this.ship.history[this.ship.history.length - 1];
-      if (!last || s.seq > this.lastShipSeq) {
-        this.ship.history = [...this.ship.history, point];
-        if (this.ship.history.length > SHIP_CAP) this.ship.history = this.ship.history.slice(-SHIP_CAP);
+      if (s.seq > this.lastShipSeq) {
+        view.history = [...view.history, point];
+        if (view.history.length > SHIP_CAP) view.history = view.history.slice(-SHIP_CAP);
+        this.lastShipSeq = s.seq;
       }
-      this.lastShipSeq = s.seq;
-      this.ship = { ...this.ship, ship: s };
+      this.shipViews.set(vid, { ...view, ship: s });
+    }
+    if (snap.stack) this.stack = snap.stack;
+    // active vessel view drives the single-ship panels & trend
+    const activeId = this.stack?.active_vehicle ?? Object.keys(ships)[0];
+    if (activeId && this.shipViews.has(activeId)) {
+      this.ship = this.shipViews.get(activeId)!;
+    } else if (snap.ship) {
+      this.ship = { ...this.ship, ship: snap.ship };
     }
     this.counts = { ...snap.counts };
 
@@ -297,13 +324,22 @@ class ClientFeed {
         this.upsertLine("telemetry", eid, pair.telemetry.lineSummary.summary, pair.telemetry.lineSummary.ts_ms ?? Date.now(), keep);
       }
     }
-    if (snap.ship) {
-      const s = snap.ship;
+    for (const [vid, s] of Object.entries(ships ?? {})) {
       const summary = `${s.meco ? "MECO" : "burning"} T+${s.t.toFixed(1)}s · ${(s.thrust_n / 1e6).toFixed(1)} MN · tank ${((s.tank?.frac ?? 0) * 100).toFixed(0)}%`;
-      this.upsertLine("ship", s.vehicle_id, summary, Date.now(), keep);
+      this.upsertLine("ship", vid, summary, Date.now(), keep);
+    }
+    if (this.stack) {
+      const st = this.stack;
+      this.upsertLine(
+        "stack",
+        "stack",
+        `stack ${st.phase} active=${st.active_vehicle ?? "-"} tank ${((st.tank?.frac ?? 0) * 100).toFixed(0)}%`,
+        Date.now(),
+        keep
+      );
     }
     for (const k of [...this.lineMap.keys()]) if (!keep.has(k)) this.lineMap.delete(k);
-    const rank: Record<string, number> = { command: 0, telemetry: 1, ship: 2 };
+    const rank: Record<string, number> = { command: 0, telemetry: 1, ship: 2, stack: 3 };
     this.lines = [...this.lineMap.values()]
       .sort((a, b) => (rank[a.kind] ?? 9) - (rank[b.kind] ?? 9) || (a.engine_id < b.engine_id ? -1 : 1))
       .slice(0, LINE_CAP);
@@ -338,6 +374,8 @@ class ClientFeed {
       lines: this.lines,
       counts: { ...this.counts },
       ship: this.ship,
+      ships: Object.fromEntries(this.shipViews),
+      stack: this.stack,
       source: this.source,
       connected: this.connected,
       lastEventMs: this.lastEventMs,

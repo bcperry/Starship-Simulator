@@ -9,14 +9,23 @@ rotating Earth.
 
 ```
 simulator/
-  engine/       Raptor (LOX/CH4) physics model (throttle, lag, propellant)
+  engine/       Raptor (LOX/CH4) physics model (throttle, lag, propellant);
+                raptor_v2() = Super Heavy sea-level, raptor_vacuum() = Starship
   telemetry/    engine<->vehicle wire: schema, publishers, command sources,
                 TelemetryEngine, EngineProcess (one step per command),
                 __main__.py (standalone engine process over Kafka)
+  ship.py       ship = ONE vehicle (33 Super Heavy / 6 Starship) drawing from
+                one shared LOX+CH4 tank; per-engine variability + failures +
+                per-step jitter; EngineGroup banks (vac/sl)
+  starship.py   Starship upper stage: 3x Raptor Vacuum + 3x sea-level banks
+  stack.py      full stack: Super Heavy -> staging coast -> Starship,
+                sequenced burns, per-stage tanks & failure models
+  shiploop.py   ship over stdio (viewer/Kafka)
+  stackloop.py  full-stack mission over stdio
   rocket.py     flight model, pitch program, simulation loop
   __main__.py   CLI (argparse, plots to trajectory.png)
 viewer/         TypeScript/React telemetry viewer (full-stack UX foundation)
-                shared/ wire types · server/ (Fastify+SSE, mock|Kafka) · src/
+                shared/ wire types · server/ (Fastify+SSE, mock|stack|Kafka) · src/
 tests/          pytest suite
 scripts/        engine_demo.py, fleet_demo.py, command_fleet_demo.py,
                 plot.py
@@ -152,6 +161,7 @@ demand vs actual, sparklines, command/telemetry seq), and a raw message feed.
 cd viewer && npm install
 
 SOURCE=mock npm run dev                          # build the UX with a synthetic feed
+SOURCE=stack npm run dev                         # full stack: Super Heavy -> Starship
 SOURCE=kafka BOOTSTRAP_SERVERS=localhost:9092 \
   COMMAND_TOPIC=starship.engine.command \
   TELEMETRY_TOPIC=starship.engine.telemetry \
@@ -220,6 +230,44 @@ print(f\"meco @ {st['meco_t']:.0f}s | {st['failed_count']}/33 failed: {st['faile
 # failure-free launch: expected_failures_per_run=0.0
 # raw hazard instead of calibration: ShipConfig(fail_hazard_per_s=0.001)
 ```
+
+## Full stack (simulator.stack): Super Heavy + Starship as one mission
+
+The `Stack` class composes two of these ships — a 33-engine **Super Heavy**
+(first stage, `raptor_v2`) and a 6-engine **Starship** upper stage
+(`simulator.starship`: 3x `raptor_vacuum` + 3x sea-level, distinct by
+`bank` on every telemetry doc, `ss-01…03` = VAC, `ss-04…06` = SL) — into one
+sequenced mission:
+
+1. **liftoff** — Super Heavy burns from its own tank (default 5,480 t LOX +
+   1,520 t CH4), 33 engines;
+2. **staging** — Super Heavy MECO (commanded or fuel-limited) + a short
+   coast (`staging_delay_s`, default 4 s);
+3. **upper** — Starship's six engines ignite, burning its own tank
+   (default 540 t LOX + 150 t CH4);
+4. **done** — upper burn out.
+
+Each stage keeps its own tank, run id, seed, failure hazard and noise stream
+(the per-stage expected failures are independent calibration: default
+`sh_expected_failures = 2.0` over the first burn, `ss_expected_failures = 1.0`
+over the upper burn). One wire document per vehicle
+(`vehicle_id: "super-heavy" | "starship"`) plus a mission-level
+`stack.status` (phase, active stage, both tanks, staging countdown) folded
+into a single `stack.status` per step. Controls apply to the *active* stage:
+`meco`/`seco` cut it (MECO before staging triggers staging), `throttle`
+scales the whole stack, `start_run` re-arms both stages fresh.
+
+```
+# full-stack mission over stdio (Super Heavy -> staging -> Starship)
+uv run python -m simulator.stackloop --dt 0.01 --speed 20
+
+# or via the viewer: SOURCE=stack starts a two-stage mission automatically
+cd viewer && PORT=8090 SOURCE=stack node --import tsx server/index.ts
+```
+
+The viewer renders the mission phase bar (LIFTOFF → STAGING → UPPER → DONE),
+a per-stage panel (own tank + own failure counts) and bank chips (VAC/SL) on
+each engine card.
 
 ## How it works
 
