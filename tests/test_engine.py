@@ -12,7 +12,7 @@ def test_thrust_is_positive_and_throttles_down():
 
 def test_mass_flow_conserves_mixture_ratio():
     out = run(E, throttle=1.0, duration=2.0)[-1]
-    assert out.mdot_ox / out.mdot_fuel == E.mixture_ratio
+    assert abs(out.mdot_ox / out.mdot_fuel - E.mixture_ratio) < 1e-9
     assert abs(out.mdot_ox + out.mdot_fuel - out.mdot_total) < 1e-9
 
 
@@ -45,13 +45,13 @@ def test_propellant_runoff_depletes_load():
 
 
 def test_spec_sheet_lands_near_published_raptor_class():
-    # Raptor 2 class: ~2000 kN / ~350 s vacuum, ~1840 kN / ~327 s sea level.
+    # Raptor 3 class: 2.45–2.75 MN / ~350 s / 350 bar (vacuum a bit better).
     vac = run(E, throttle=1.0, duration=2.0, ambient_pressure=0.0)[-1]
     sl = run(E, throttle=1.0, duration=2.0, ambient_pressure=101_325.0)[-1]
-    assert 1.7e6 < vac.thrust < 2.3e6
-    assert 335.0 < vac.isp < 365.0
-    assert 1.6e6 < sl.thrust < 2.0e6
-    assert 310.0 < sl.isp < 340.0
+    assert 2.45e6 < vac.thrust < 3.0e6
+    assert 345.0 < vac.isp < 400.0
+    assert 2.40e6 < sl.thrust < 2.80e6
+    assert 340.0 < sl.isp < 390.0
 
 
 def test_invalid_parameters_raise():

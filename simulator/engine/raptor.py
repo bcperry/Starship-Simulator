@@ -37,24 +37,25 @@ R_UNIV = 8.314462     # J/(mol K)
 class RaptorEngine:
     """Parameterisable Raptor-class full-flow staged-combustion engine.
 
-    Defaults approximate a Raptor 2 running at full vacuum power.
+    Defaults approximate a Raptor 3 running at full power:
+    ~2.5–2.8 MN sea level, Isp ~350 s, chamber pressure 350 bar.
     """
 
-    name: str = "Raptor 2"
+    name: str = "Raptor 3"
 
     # feed / mixture
     mixture_ratio: float = 3.6          # O/F by mass (LOX / CH4)
-    chamber_pressure: float = 3.0e7     # Pa, target at 100% throttle (~30 MPa)
-    throat_area: float = 0.035          # m^2, gas-generator / injector throat
+    chamber_pressure: float = 3.5e7     # Pa, target at 100% throttle (~35 MPa / 350 bar)
+    throat_area: float = 0.043          # m^2, injector throat
 
     # nozzle
-    nozzle_area_ratio: float = 40.0     # A_e / A_t (fixed geometry)
+    nozzle_area_ratio: float = 30.0     # A_e / A_t (fixed geometry)
 
     # combustion products (single effective gas; effective values calibrated
-    # so the model lands on the published Raptor 2 class spec sheet)
-    gas_temperature: float = 3900.0     # K, effective chamber temperature
-    gas_molar_mass: float = 0.0223      # kg/mol, effective products (~CO2/H2O mix)
-    gas_gamma: float = 1.22             # -
+    # so the model lands on the published Raptor 3 spec sheet)
+    gas_temperature: float = 4200.0     # K, effective chamber temperature
+    gas_molar_mass: float = 0.020       # kg/mol, effective products (~CO2/H2O mix)
+    gas_gamma: float = 1.24             # -
     cstar_efficiency: float = 1.00      # -  (<1: injector/combustion losses)
     thrust_efficiency: float = 1.00     # -  (<1: real-gas / non-isentropic losses)
 
@@ -339,21 +340,22 @@ def summary(engine: RaptorEngine, sl: EngineOutput | None = None,
 # Same physics, different hardware: the presets only change geometry /
 # efficiency so one Raptor sim backs every engine on the full stack.
 
-#: Sea-level Raptor (Super Heavy's 33, and Starship's three sea-level
-#: engines). ~1.96 MN vacuum, Isp_vac ~351 s, 568 kg/s at 100 %.
-#: (Raptor 2 spec: 2.00–2.4 MN / ~327–358 s — this model sits in band.)
-def raptor_v2() -> RaptorEngine:
-    return RaptorEngine(name="Raptor V2 (SL)")
+#: Sea-level Raptor 3 (Super Heavy's 33, and Starship's three sea-level engines).
+#: ~2.55–2.7 MN sea level / ~2.7–2.9 MN vacuum, Isp ~350–375 s, ~850 kg/s at 100 %
+#: — in band with the published Raptor 3 (2.45–2.75 MN / ~350 s / 350 bar).
+def raptor_v3() -> RaptorEngine:
+    return RaptorEngine()
+
+#: Back-compat alias (pre-Raptor-3 preset name).
+raptor_v2 = raptor_v3
 
 
-#: Raptor Vacuum: vacuum-optimised high-expansion nozzle (A_e/A_t ≈ 171,
-#: ~6.7 m^2 exit). ~2.57 MN vacuum, Isp_vac ≈ 376 s, 698 kg/s at 100 % —
-#: in band with the published Raptor V (2.51–2.8 MN / ~380 s). Note the
-#: sea-level penalty: over-expanded, it loses ~30 % of its vacuum thrust.
+#: Raptor 3 Vacuum: vacuum-optimised high-expansion nozzle (A_e/A_t ≈ 110).
+#: ~1.9 MN sea level (over-expanded, ~30 % loss) but ~3.0 MN vacuum /
+#: Isp ≈ 390 s for the upper stage.
 def raptor_vacuum() -> RaptorEngine:
     return RaptorEngine(
-        name="Raptor Vacuum",
-        throat_area=0.043,
-        nozzle_area_ratio=171.0,
-        thrust_efficiency=1.02,
+        name="Raptor 3 Vacuum",
+        throat_area=0.040,
+        nozzle_area_ratio=110.0,
     )

@@ -1,16 +1,21 @@
 # Starship (simulator)
 
-A 2-D flight sim of a SpaceX-style heavy-lift booster: semi-implicit Euler
-integration of point-mass dynamics with a gravity-turn pitch program,
-exponential atmosphere, drag, engine ignition delay, and (optionally) a
-rotating Earth.
+A full-stack, 3-D launch simulator of a SpaceX-style Starship vehicle
+(Raptor-3 powered Super Heavy booster + Starship upper stage). The core is a
+point-mass 6-DOF flight model in an inertial (ECI) frame -- classical RK4
+integration with J2, a 3-layer exponential atmosphere, drag, engine ignition
+delay and failure -- driven by a 39-engine Raptor-3 fleet (33 on Super Heavy,
+6 on Starship) with per-engine variability, high-frequency output jitter and
+exponential time-to-failure. A gravity-turn pitch program flies the vehicle to
+multi-ton LEO payload insertion while Super Heavy banks its propellant for
+boostback.
 
 ## Layout
 
 ```
 simulator/
   engine/       Raptor (LOX/CH4) physics model (throttle, lag, propellant);
-                raptor_v2() = Super Heavy sea-level, raptor_vacuum() = Starship
+                raptor_v3() = Raptor 3, raptor_vacuum() = long-nozzle variant
   telemetry/    engine<->vehicle wire: schema, publishers, command sources,
                 TelemetryEngine, EngineProcess (one step per command),
                 __main__.py (standalone engine process over Kafka)
@@ -22,7 +27,12 @@ simulator/
                 sequenced burns, per-stage tanks & failure models
   shiploop.py   ship over stdio (viewer/Kafka)
   stackloop.py  full-stack mission over stdio
-  rocket.py     flight model, pitch program, simulation loop
+  orbit.py      6-DOF ECI flight model: RK4, J2, 3-layer atmosphere + drag,
+                gravity-turn pitch program, orbital elements
+  flight.py     mission layer: engine stack + flight model + guidance
+                (Super Heavy boostback MECO, Starship SECO to LEO)
+  flightloop.py full-stack mission over stdio (SSE stream to the viewer)
+  rocket.py     legacy 2-D single-booster flight model + plot
   __main__.py   CLI (argparse, plots to trajectory.png)
 viewer/         TypeScript/React telemetry viewer (full-stack UX foundation)
                 shared/ wire types · server/ (Fastify+SSE, mock|stack|Kafka) · src/
@@ -48,15 +58,36 @@ uv run python -m simulator --earth-rotation # account for the launch site spinni
 The sim stops at apogee and saves `trajectory.png`: altitude/MAV profile,
 velocity breakdown, pitch angle, and the flight path on a non-log scale.
 
+## Full-stack LEO mission
+
+`simulator/flight.py` composes the engine fleet with the 6-DOF flight model
+into a real orbital launch: Super Heavy (33x Raptor 3) boosts the full stack,
+stages with ~20 % of its propellant banked for boostback, and Starship
+(6x Raptor 3) completes insertion. The vehicle is sized so the **full stack
+inserts a ~50 t payload into LEO** (perigee above the 100 km line) while
+**Starship alone is sub-orbital** -- the mission requires both stages.
+
+```
+uv run python scripts/headless_mission.py            # headless LEO run + orbit readout
+uv run python -m simulator.flightloop --speed 20     # live mission (SSE to the viewer)
+```
+
+Acceptance (`tests/test_flight.py`): a launch suffers **1-3 engine failures in
+aggregate** yet still establishes LEO (perigee >= 100 km); Super Heavy banks
+its boostback propellant; Starship alone cannot reach orbit. Losing 3+ of
+Starship's 6 engines is a genuine anomaly the stage re-enters on (honest,
+not a sim bug).
+
 ## Engine model
 
 `simulator/engine/raptor.py` is a parameterized gas-generator cycle
-engine (default: Raptor 2): choked injector flow sets mass flow from
+engine (default: Raptor 3): choked injector flow sets mass flow from
 `Pc * A_t`, isentropic nozzle expansion gives `C_F`, and the rocket
 equation `F = A_e (p_e - p_a) + mdot v_e` gives thrust at any ambient
 pressure. Throttling is a first-order lag on chamber pressure; optional
-finite propellant with mixture-ratio-consistent consumption. Calibrated
-to the published spec sheet (~1.9 MN / ~350 s vacuum).
+finite propellant with mixture-ratio-consistent consumption. Calibrated to
+the Raptor 3 spec sheet (~2.5-2.7 MN sea-level, ~2.7-3.0 MN vacuum, ~350 s
+Isp at 350 bar).
 
 Quick demo (no GUI needed):
 
@@ -232,6 +263,12 @@ print(f\"meco @ {st['meco_t']:.0f}s | {st['failed_count']}/33 failed: {st['faile
 ```
 
 ## Full stack (simulator.stack): Super Heavy + Starship as one mission
+
+> The `Stack` class below is the per-ship sequencer also used by the 6-DOF LEO
+> mission (`simulator.flight`). The tank loads quoted here (5,480 t SH / 540 t SS)
+> are the **per-ship demo defaults** (`ShipConfig`); the LEO mission sizes its
+> tanks differently (4,200 t SH / 1,200 t SS, `flight.TANK_DEFAULTS`) -- see the
+> "Full-stack LEO mission" section above.
 
 The `Stack` class composes two of these ships — a 33-engine **Super Heavy**
 (first stage, `raptor_v2`) and a 6-engine **Starship** upper stage

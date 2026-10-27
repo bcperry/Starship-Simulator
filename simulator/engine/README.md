@@ -1,7 +1,8 @@
 # Raptor engine simulation
 
-A parameterizable LOX/CH4 rocket engine model (defaults: **Raptor 2** class,
-~1.759 MN / ~350 s vacuum) plus the tooling to run it: a quick-print
+A parameterizable LOX/CH4 rocket engine model (defaults: **Raptor 3** class,
+~2.5\u20132.7 MN sea-level / ~2.7\u20133.0 MN vacuum, ~350 s Isp at 350 bar)
+plus the tooling to run it: a quick-print
 demo, a Python API for custom loops, and a
 telemetry adapter for feeding a vehicle-level sim.
 
@@ -21,7 +22,7 @@ uv run python scripts/engine_demo.py
 ```
 
 Prints the rated flows (max mdot, LOX/CH4 split) and SL vs vacuum thrust,
-Isp, exhaust velocity, exit pressure for the default Raptor 2.
+Isp, exhaust velocity, exit pressure for the default Raptor 3.
 
 ### 2. Call it from Python
 
@@ -47,13 +48,13 @@ All fields of the frozen `RaptorEngine` dataclass (SI units):
 
 | field                    | default        | meaning                                          |
 |--------------------------|----------------|--------------------------------------------------|
-| `name`                   | `"Raptor 2"`   | label, free-form                                 |
+| `name`                   | `"Raptor 3"`   | label, free-form                                 |
 | `mixture_ratio`          | `3.6`          | O/F mass ratio (LOX/CH4)                         |
-| `chamber_pressure`       | `3.0e7` Pa     | target Pc at 100% throttle                       |
-| `throat_area`            | `0.035` m²     | injector throat area                             |
-| `nozzle_area_ratio`      | `40.0`         | A_e/A_t, fixed geometry                          |
-| `gas_temperature`        | `3900.0` K     | effective chamber temperature                    |
-| `gas_molar_mass`         | `0.0223` kg/mol| effective products molar mass                    |
+| `chamber_pressure`       | `3.5e7` Pa     | target Pc at 100% throttle (~35 MPa / 350 bar)   |
+| `throat_area`            | `0.043` m²     | injector throat area                             |
+| `nozzle_area_ratio`      | `30.0`         | A_e/A_t, fixed geometry                          |
+| `gas_temperature`        | `4200.0` K     | effective chamber temperature                    |
+| `gas_molar_mass`         | `0.020` kg/mol | effective products molar mass                    |
 | `gas_gamma`              | `1.22`         | effective specific-heat ratio                    |
 | `cstar_efficiency`       | `1.00`         | injector/combustion losses (<1 derates C*)       |
 | `thrust_efficiency`      | `1.00`         | real-gas / non-isentropic losses (<1 derates CF) |

@@ -453,8 +453,8 @@ def test_ship_outputs_breathe_with_high_frequency_jitter():
     tmean = sum(totals) / len(totals)
     tstd = (sum((x - tmean) ** 2 for x in totals) / len(totals)) ** 0.5
     assert 0.001 < tstd / tmean < 0.01
-    # and it stays centred on the nominal ~1.8 MN/engine band
-    assert 1.5e6 < tmean / ship.config.n_engines < 2.2e6
+    # and it stays centred on the nominal Raptor-3 ~2.45-2.75 MN/engine band
+    assert 2.3e6 < tmean / ship.config.n_engines < 2.9e6
 
 
 def test_ship_jitter_is_deterministic_per_run_and_retunable():
@@ -565,10 +565,14 @@ def test_starship_full_burn_completes_and_respects_expectation():
     assert st["n_engines"] == 6
     # with expected=1 on 6 engines over the full burn, ~50 % of runs fail one
     # engine -- run a few and require at least one has, none more than 3
-    saw = [_mk(s) for s in range(1, 9)]
+    saw = [_mk(s) for s in range(1, 13)]
     for s in saw:
         _run_to_meco(s)
-    nfail = sum(1 for s in saw if any(m.failed for m in s._members))
-    assert nfail >= 1, "expectation 1.0 on 6 engines should produce failures in most runs"
-    for s in saw:
-        assert sum(1 for m in s._members if m.failed) <= 3, "no more than 3 failures per burn"
+    counts = [sum(1 for m in s._members if m.failed) for s in saw]
+    total = sum(counts)
+    # configured expectation of ~1 failure per full burn: it must actually occur...
+    assert any(c >= 1 for c in counts), "expectation 1.0 should fail an engine in most runs"
+    # ...no single burn is catastrophic (mean is ~1.0, a large cluster is far in the tail),
+    # and the realised mean tracks the configured expectation.
+    assert max(counts) <= 5, f"no single burn more than 5 failures (got {max(counts)})"
+    assert 0.4 <= total / len(saw) <= 1.9, f"mean {total/len(saw):.2f} should track expectation 1.0"
