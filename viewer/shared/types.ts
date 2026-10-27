@@ -19,7 +19,7 @@ export interface TelemetryMessage {
   seq: number;
   t: number;
   ts_ms: number;
-  state: "idle" | "firing" | "cut";
+  state: "idle" | "firing" | "cut" | "failed";
   throttle_demand_frac: number;
   throttle_actual_frac: number;
   chamber_pressure_pa: number;
@@ -69,6 +69,10 @@ export interface ShipStatusMessage {
   n_engines: number;
   firing_count: number;
   cut_count: number;
+  failed_count?: number;
+  failed_engines?: string[];
+  expected_failures_per_run?: number;
+  fail_hazard_per_s?: number;
   all_firing: boolean;
   vari_frac: number;
   seed?: string | number | null;

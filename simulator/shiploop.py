@@ -249,6 +249,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engines", type=int, default=33)
     p.add_argument("--seed", type=int, default=1, help="run seed (re-draws the per-engine starting-condition spread)")
     p.add_argument("--vari", type=float, default=0.01, help="per-engine starting-condition spread fraction")
+    p.add_argument("--failures-per-run", type=float, default=2.0,
+                   help="EXPECTED fleet failures over a nominal full-tank launch (0 disables failures; "
+                        "the ship calibrates a per-engine constant hazard rate from this)")
+    p.add_argument("--fail-hazard", type=float, default=None,
+                   help="per-engine failure hazard rate lambda (1/s); overrides --failures-per-run")
     p.add_argument("--lox-kg", type=float, default=5_480_000.0, help="shared LOX tank load, kg")
     p.add_argument("--ch4-kg", type=float, default=1_520_000.0, help="shared CH4 tank load, kg")
     p.add_argument("--throttle", type=float, default=1.0, help="commanded throttle 0..1.5")
@@ -291,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
             throttle_frac=args.throttle,
             ambient_pressure_pa=args.ambient,
             dt=args.dt,
+            expected_failures_per_run=args.failures_per_run,
+            fail_hazard_per_s=args.fail_hazard,
         )
     )
     if args.bootstrap:

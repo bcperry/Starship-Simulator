@@ -96,6 +96,16 @@ export class ShipProcessSource implements Source {
         try {
           doc = JSON.parse(line);
         } catch {
+          // never drop silently -- it hides wire bugs (e.g. Python
+          // serialising Infinity/NaN into otherwise-valid documents)
+          try {
+            fs.appendFileSync(
+              process.env.SHIP_LOG ?? "/tmp/ship-err.log",
+              `[${new Date().toISOString()}] dropped malformed line: ${line.slice(0, 300)}\n`,
+            );
+          } catch {
+            /* ignore */
+          }
           continue;
         }
         if (doc?.type === "ship.ack") {

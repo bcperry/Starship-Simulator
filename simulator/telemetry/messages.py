@@ -21,7 +21,7 @@ engine_id                 str    engine identity within the vehicle (e.g. "sh-07
 seq                       int    1-based step counter for this engine instance
 t                         float  sim time, s since step 0
 ts_ms                     int    wall-clock publish time, epoch ms
-state                     str    "idle" | "firing" | "cut"
+state                     str    "idle" | "firing" | "cut" | "failed"
 throttle_demand_frac      float  commanded throttle (0..1, can exceed 1 at boost)
 throttle_actual_frac      float  achieved throttle = Pc_actual / Pc_full
 chamber_pressure_pa       float  actual chamber pressure, Pa
@@ -92,6 +92,7 @@ SHIP_CONTROL = "ship.control"          # operator -> ship loop: start_run / thro
 STATE_IDLE = "idle"
 STATE_FIRING = "firing"
 STATE_CUT = "cut"
+STATE_FAILED = "failed"  # engine faulted: no thrust, not drawing propellant
 
 # below this actual mass flow an engine counts as idle (denoise floor, kg/s)
 _FIRING_EPS_MDOT = 1e-9
@@ -159,7 +160,11 @@ class ShipStatusMessage(TypedDict, total=False):
     n_engines: int
     firing_count: int
     cut_count: int
+    failed_count: int
+    failed_engines: list[str]
     all_firing: bool
+    expected_failures_per_run: float
+    fail_hazard_per_s: float
     thrust_n: float
     thrust_min_n: float
     thrust_max_n: float
@@ -271,7 +276,7 @@ def aggregate_fleet(messages: list[TelemetryMessage]) -> dict:
             f"aggregate_fleet: mixed schema versions {sorted({m['v'] for m in messages})}"
         )
 
-    state_counts = {STATE_IDLE: 0, STATE_FIRING: 0, STATE_CUT: 0}
+    state_counts = {STATE_IDLE: 0, STATE_FIRING: 0, STATE_CUT: 0, STATE_FAILED: 0}
     for m in messages:
         state_counts[m["state"]] += 1
 
@@ -283,8 +288,10 @@ def aggregate_fleet(messages: list[TelemetryMessage]) -> dict:
         "engine_count": len(messages),
         "firing_count": state_counts[STATE_FIRING],
         "cut_count": state_counts[STATE_CUT],
+        "failed_count": state_counts[STATE_FAILED],
         "all_firing": state_counts[STATE_FIRING] == len(messages),
         "any_cut": state_counts[STATE_CUT] > 0,
+        "any_failed": state_counts[STATE_FAILED] > 0,
         "thrust_n": sum(m["thrust_n"] for m in messages),
         "mdot_kg_s": {
             key: sum(m["mdot_kg_s"][key] for m in messages)
@@ -388,8 +395,13 @@ def to_ship_status(
     thrust_min_n: float | None = None,
     thrust_max_n: float | None = None,
     mixture_ratio: float | None = None,
+    n_failed: int | None = None,
+    failed_engines: list[str] | None = None,
+    expected_failures_per_run: float | None = None,
+    fail_hazard_per_s: float | None = None,
 ) -> ShipStatusMessage:
     """Build one ship per-cycle status document (shared fuel + run state)."""
+
     total = max(0.0, tank_ox_kg + tank_ch4_kg)
     frac = (total / tank_total_initial_kg) if tank_total_initial_kg > 0.0 else 0.0
 
@@ -427,6 +439,8 @@ def to_ship_status(
         "n_engines": int(n_engines),
         "firing_count": int(firing_count),
         "cut_count": int(cut_count),
+        "failed_count": int(n_failed) if n_failed is not None else 0,
+        "failed_engines": list(failed_engines) if failed_engines is not None else [],
         "all_firing": (n_engines > 0 and firing_count == n_engines),
         "thrust_n": max(0.0, float(thrust_n)),
         "mdot_kg_s": {k: float(v) for k, v in mdot_kg_s.items()},
@@ -446,6 +460,10 @@ def to_ship_status(
         )
     if mixture_ratio is not None and mixture_ratio > 0.0:
         doc["mixture_ratio"] = float(mixture_ratio)
+    if expected_failures_per_run is not None:
+        doc["expected_failures_per_run"] = float(expected_failures_per_run)
+    if fail_hazard_per_s is not None:
+        doc["fail_hazard_per_s"] = float(fail_hazard_per_s)
     return doc
 
 

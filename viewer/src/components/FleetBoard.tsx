@@ -34,12 +34,12 @@ export function FleetBoard({ f }: { f: FleetSummary }) {
         v={
           <>{f.firing_count}
             <small>
-              firing · {f.cut_count} cut · {f.idle_count} idle
+              {" "}firing · {f.cut_count} cut · {f.failed_count} failed · {f.idle_count} idle
             </small>
           </>
         }
-        f={f.any_cut ? "propellant shortage on ≥1 engine" : "all nominal"}
-        m={f.any_cut ? "var(--red)" : f.all_firing ? "var(--accent)" : "var(--cyan)"}
+        f={f.any_failed ? `${f.failed_count} engine failure(s) on this run` : f.any_cut ? "propellant shortage on ≥1 engine" : "all nominal"}
+        m={f.any_failed ? "var(--amber)" : f.any_cut ? "var(--red)" : f.all_firing ? "var(--accent)" : "var(--cyan)"}
       />
       <Metric
         k="Min chamber pressure"

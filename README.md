@@ -166,6 +166,52 @@ The architecture is deliberately composable — `shared/types.ts` (wire schema),
 `src/hooks/useFeed.ts` (store→React). Adding a graph, a new panel, a replay
 source, or persistence is a local change. See `viewer/README.md`.
 
+## Ship-level sim (simulator.ship) + engine failure model
+
+A launch is one vehicle of N Raptor engines (Super Heavy: 33, Ship: 6)
+drawing from ONE shared LOX + CH4 tank: the ship is the fuel authority,
+feeds the engines each cycle, and commands MECO when the tank can no longer
+feed a step. Per-engine starting conditions are spread over +/-``vari_frac``
+(default 1%), seeded per (vehicle, run seed, engine index). Each engine can
+also *fail* at a random moment during the burn:
+
+- **Model**: constant-hazard (exponential) time-to-failure — the standard
+  reliability-theory model for random hardware failures inside a single
+  short burn (turbopump seizure, valve failure, combustion instability,
+  control faults). It is the standard choice
+  consistent with real Starship history: failures at ignition, mid-burn,
+  near MECO, all of them — a constant per-second failure rate.
+- **Inputs** (`ShipConfig` / `shiploop` CLI):
+  - `expected_failures_per_run` (default **2.0**, `--failures-per-run`):
+    the EXPECTED fleet failures over a nominal full-tank launch; the ship
+    solves the per-engine hazard `lambda = -ln(1 - E/N) / T_nom`. 0 makes
+    launches failure-free; 1-3 is the observed standard band.
+  - `fail_hazard_per_s` (`--fail-hazard`): pass the distribution parameter
+    directly, overriding the calibration.
+- **Mechanics**: every step, each live engine rolls
+  `P(fail) = 1 - exp(-lambda dt)` (exact discrete survival, dt-invariant).
+  A failed engine produces no thrust and draws no propellant — the shared
+tank keeps feeding only the healthy engines, so fleet fuel flow, thrust and
+MECO all stay correct for any number of failures.
+- **Wire**: engine `state` gains `"failed"` (distinct from `"cut"`, which is
+  a feed cutoff); `ship.status` gains `failed_count`, `failed_engines`,
+  `expected_failures_per_run`, `fail_hazard_per_s`. The viewer badges failed
+  engines and lists them on the ship panel.
+
+Fast physics check (no viewer/Kafka needed):
+
+```
+uv run python -c "
+from simulator.ship import Ship, ShipConfig
+s = Ship(ShipConfig(seed=42, expected_failures_per_run=2.0))
+while not (s.meco and s.t >= (s.meco_t or 0) + 5): s.step()
+st = s.status()
+print(f\"meco @ {st['meco_t']:.0f}s | {st['failed_count']}/33 failed: {st['failed_engines']}\")
+"
+# failure-free launch: expected_failures_per_run=0.0
+# raw hazard instead of calibration: ShipConfig(fail_hazard_per_s=0.001)
+```
+
 ## How it works
 
 Full details in `simulator/rocket.py` and `simulator/engine/raptor.py`

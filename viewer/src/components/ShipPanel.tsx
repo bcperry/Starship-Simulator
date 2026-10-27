@@ -40,7 +40,7 @@ export function ShipPanel({ ship }: { ship: ShipView }) {
           {s.meco ? "MECO" : "burning"}
         </span>
         <span className="dim small mono">
-          {s.n_engines} engines · ±{Math.round((s.vari_frac ?? 1) * 100)}%
+          {s.n_engines} engines · {s.failed_count ?? 0} failed · ±{Math.round((s.vari_frac ?? 1) * 100)}%
         </span>
         <span className="dim small mono">T+ {s.t.toFixed(1)}s</span>
         <span className="dim small mono" title={s.run_id}>{s.run_id.slice(0, 13)}…</span>
@@ -62,7 +62,19 @@ export function ShipPanel({ ship }: { ship: ShipView }) {
         <span>
           {s.tank.limited ? `LIMITED: ${s.tank.limited}` : "tanks nominal"}
         </span>
+        <span title="constant-hazard (exponential) time-to-failure model, calibrated to this expected fleet failure count per full-tank launch">
+          exp. failures ≈ {s.expected_failures_per_run != null ? s.expected_failures_per_run.toFixed(1) : "—"}
+        </span>
       </div>
+
+      {(s.failed_engines?.length ?? 0) > 0 && (
+        <div className="failrow mono">
+          <b style={{ color: "var(--amber)" }}>FAILED:</b>
+          {(s.failed_engines ?? []).map((id) => (
+            <span key={id} className="failid">{id}</span>
+          ))}
+        </div>
+      )}
 
       {tankHist.length > 2 && (
         <div className="shipspark" title="tank fraction over time">

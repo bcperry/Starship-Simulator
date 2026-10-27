@@ -3,11 +3,11 @@ import type { EngineView } from "../feed";
 import { EngineCard } from "./EngineCard";
 import { RadarIcon } from "./Icons";
 
-const RANK: Record<string, number> = { cut: 0, idle: 1, firing: 2 };
+const RANK: Record<string, number> = { failed: 0, cut: 1, idle: 2, firing: 3 };
 
 export function EngineGrid({ engines }: { engines: EngineView[] }) {
   const [q, setQ] = useState("");
-  const [stateFilter, setStateFilter] = useState<"all" | "firing" | "idle" | "cut">("all");
+  const [stateFilter, setStateFilter] = useState<"all" | "firing" | "idle" | "cut" | "failed">("all");
 
   const shown = useMemo(() => {
     const list = engines.filter((e) => {
@@ -44,7 +44,7 @@ export function EngineGrid({ engines }: { engines: EngineView[] }) {
           onChange={(e) => setQ(e.target.value)}
         />
         <div style={{ display: "flex", gap: 5 }}>
-          {(["all", "cut", "idle", "firing"] as const).map((s) => (
+          {(["all", "failed", "cut", "idle", "firing"] as const).map((s) => (
             <button
               key={s}
               className={stateFilter === s ? "active" : undefined}

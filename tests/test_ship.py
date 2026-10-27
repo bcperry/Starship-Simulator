@@ -36,6 +36,9 @@ def _cfg(**kw) -> ShipConfig:
         "throttle_frac": 1.0,
         "ambient_pressure_pa": 101_325.0,
         "dt": 0.02,
+        # failure model off by default in these tests (they isolate the tank
+        # feed mechanics); the failure-model tests below opt in explicitly
+        "expected_failures_per_run": 0.0,
     }
     base.update(kw)
     return ShipConfig(**base)
@@ -240,3 +243,158 @@ def test_step_documents_shape():
     # the ship is a single fuel authority; fleet aggregate still folds cleanly
     agg = aggregate_fleet(tels)
     assert agg["engine_count"] == 4
+
+
+# --- failure model: constant-hazard (exponential) time-to-failure ---
+
+
+def _run_to_meco(ship: Ship) -> Ship:
+    """Step the ship until MECO plus a short coast-down; return the ship."""
+    while not (ship.meco and ship.t >= (ship.meco_t or 0) + 1.0):
+        ship.step()
+    return ship
+
+
+def test_failure_calibration_math():
+    """expected_failures_per_run -> lambda = -ln(1 - E/N) / T_nominal."""
+    import math
+
+    for expected in (0.0, 1.0, 2.0, 3.5):
+        ship = Ship(_cfg(expected_failures_per_run=expected))
+        t_nom = ship._nominal_burn_s(52_000.0)
+        if expected <= 0.0:
+            assert ship._fail_lambda == 0.0
+            continue
+        p = min(expected / 4, 0.999)
+        expected_lambda = -math.log(1.0 - p) / t_nom
+        assert ship._fail_lambda == pytest.approx(expected_lambda, rel=1e-12)
+    # explicit hazard is used verbatim (raw distribution parameter input)
+    assert Ship(_cfg(fail_hazard_per_s=0.03))._fail_lambda == pytest.approx(0.03)
+    with pytest.raises(ValueError):
+        _cfg(expected_failures_per_run=-1.0)
+    with pytest.raises(ValueError):
+        _cfg(fail_hazard_per_s=-0.01)
+
+
+def test_failures_deterministic_per_seed():
+    a = Ship(_cfg(seed=11, expected_failures_per_run=2.0))
+    _run_to_meco(a)
+    b = Ship(_cfg(seed=11, expected_failures_per_run=2.0))
+    _run_to_meco(b)
+    fa = [(m.engine_id, m.fail_time) for m in a._members if m.failed]
+    fb = [(m.engine_id, m.fail_time) for m in b._members if m.failed]
+    assert fa and fa == fb
+    assert a.status()["tank"]["frac"] == pytest.approx(b.status()["tank"]["frac"], abs=1e-12)
+
+
+def test_failed_engines_stop_burning_and_tank_accounting_holds():
+    """Failed engines: zero thrust/mdot on the wire; while the ship is feeding,
+    the shared tank drains by EXACTLY what the live engines report burning
+    (capped at what remains)."""
+    ship = Ship(_cfg(seed=7, expected_failures_per_run=2.0))  # deterministically loses sh-04 early
+    saw_failure = False
+    while not (ship.meco and ship.t >= (ship.meco_t or 0) + 1.0):
+        meco_before = ship.meco
+        ox0, ch40 = ship.tank_ox_kg, ship.tank_ch4_kg
+        docs = ship.step()
+        tels = [d for d in docs if d["type"] == ENGINE_TELEMETRY]
+        rep_ox = sum(t["mdot_kg_s"]["lox"] for t in tels) * ship.config.dt
+        rep_ch4 = sum(t["mdot_kg_s"]["ch4"] for t in tels) * ship.config.dt
+        for tel in tels:
+            if tel["state"] == "failed":
+                saw_failure = True
+                assert tel["thrust_n"] == 0.0
+                assert tel["mdot_kg_s"]["total"] == 0.0
+        if not meco_before:
+            # active feeding step: drain == reported burn, capped at available
+            assert ox0 - ship.tank_ox_kg == pytest.approx(min(ox0, rep_ox), abs=1e-9)
+            assert ch40 - ship.tank_ch4_kg == pytest.approx(min(ch40, rep_ch4), abs=1e-9)
+    assert saw_failure, "expected a failure on this seeded run, none happened"
+    st = ship.status()
+    assert st["failed_count"] >= 1
+    assert len(st["failed_engines"]) == st["failed_count"]
+    assert st["firing_count"] + st["cut_count"] + st["failed_count"] == st["n_engines"]
+
+
+def test_failure_docs_are_strict_json():
+    """Every published document must serialise to STRICT JSON.
+
+    Regression: a failed engine once carried propellant_remaining=inf, and
+    Python's json emits the bare token ``Infinity`` -- invalid JSON that
+    downstream (Node) parsers reject, silently dropping the whole wire line.
+    """
+    import json
+
+    found = False
+    for seed in range(1, 11):
+        ship = Ship(_cfg(seed=seed, fail_hazard_per_s=5.0, n_engines=4))
+        while not (ship.meco and ship.t >= (ship.meco_t or 0) + 1.0):
+            for doc in ship.step():
+                strict = json.dumps(doc, allow_nan=False)  # raises on inf/nan
+                json.loads(strict)
+        if any(m.failed for m in ship._members):
+            found = True
+            break
+    assert found, "expected at least one seeded run with a failure"
+
+
+def test_zero_expected_failures_gives_failure_free_run():
+    ship = _run_to_meco(Ship(_cfg(seed=11, expected_failures_per_run=0.0)))
+    assert all(not m.failed for m in ship._members)
+
+
+def test_all_engines_fail_meco_and_zero_thrust():
+    ship = Ship(_cfg(seed=3, fail_hazard_per_s=0.5))
+    while not (ship.meco and ship.t >= (ship.meco_t or 0) + 1.0):
+        ship.step()
+    assert all(m.failed for m in ship._members)
+    docs = [d for d in ship.step() if d["type"] == ENGINE_TELEMETRY]
+    assert all(d["state"] == "failed" and d["thrust_n"] == 0.0 for d in docs)
+    st = ship.status()
+    assert st["failed_count"] == st["n_engines"]
+    assert st["thrust_n"] == 0.0
+
+
+def test_fleet_failure_count_follows_model():
+    """With expected_failures_per_run=2 over 200 launches of the 4-engine
+    test ship: the fleet failure count sits near 2, 1-3 failures dominate
+    ('1-3 with standard params'), and some launches still fly clean."""
+    counts = []
+    for seed in range(1, 201):
+        ship = _run_to_meco(Ship(_cfg(seed=seed, expected_failures_per_run=2.0)))
+        counts.append(sum(1 for m in ship._members if m.failed))
+    dist = {k: counts.count(k) for k in sorted(set(counts))}
+    mean = sum(counts) / len(counts)
+    assert 1.8 <= mean <= 3.2
+    assert sum(v for k, v in dist.items() if k in (1, 2, 3)) > 0.6 * len(counts)
+    assert dist.get(0, 0) > 0
+    assert max(counts) <= 4
+
+
+def test_failure_can_happen_at_ignition_or_midburn():
+    """Failures must be able to land at engine start AND late in the burn
+    (real history: failed ignitions pre-T-0 AND T+1m16s cut-offs)."""
+    early = late = False
+    for seed in range(1, 21):
+        ship = _run_to_meco(Ship(_cfg(seed=seed, expected_failures_per_run=2.0)))
+        ttf = [m.fail_time for m in ship._members if m.failed]
+        if not ttf:
+            continue
+        if min(ttf) < 2.0:
+            early = True
+        if max(ttf) > 15.0:
+            late = True
+        if early and late:
+            break
+    assert early and late
+
+
+def test_meco_stops_failure_rolls():
+    """After MECO there is no burn and therefore no new failures can appear."""
+    ship = Ship(_cfg(seed=11, expected_failures_per_run=2.0))
+    ids_before = [m.engine_id for m in ship._members if m.failed]
+    ship.apply_control(ship_control("sh-test", "meco"))
+    for _ in range(500):
+        ship.step()
+    ids_after = [m.engine_id for m in ship._members if m.failed]
+    assert ids_after == ids_before

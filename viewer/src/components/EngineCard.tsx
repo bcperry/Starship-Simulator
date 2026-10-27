@@ -8,6 +8,7 @@ const STATE_META: Record<string, { label: string; cls: string }> = {
   firing: { label: "firing", cls: "firing" },
   idle: { label: "idle", cls: "idle" },
   cut: { label: "cut", cls: "cut" },
+  failed: { label: "failed", cls: "failed" },
 };
 
 export function EngineCard({ v }: { v: EngineView }) {

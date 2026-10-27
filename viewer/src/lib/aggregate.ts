@@ -10,8 +10,10 @@ export interface FleetSummary {
   firing_count: number;
   cut_count: number;
   idle_count: number;
+  failed_count: number;
   all_firing: boolean;
   any_cut: boolean;
+  any_failed: boolean;
   thrust_n: number;
   mdot_total_kg_s: number;
   mdot_lox_kg_s: number;
@@ -27,6 +29,7 @@ export function fleetSummary(
   let firing = 0;
   let cut = 0;
   let idle = 0;
+  let failed = 0;
   let thrust = 0;
   let mdot = 0;
   let mdotLox = 0;
@@ -37,6 +40,7 @@ export function fleetSummary(
   for (const msg of latest.values()) {
     if (msg.state === "firing") firing += 1;
     else if (msg.state === "cut") cut += 1;
+    else if (msg.state === "failed") failed += 1;
     else idle += 1;
     thrust += msg.thrust_n;
     mdot += msg.mdot_kg_s.total;
@@ -59,8 +63,10 @@ export function fleetSummary(
     firing_count: firing,
     cut_count: cut,
     idle_count: idle,
+    failed_count: failed,
     all_firing: n > 0 && firing === n,
     any_cut: cut > 0,
+    any_failed: failed > 0,
     thrust_n: thrust,
     mdot_total_kg_s: mdot,
     mdot_lox_kg_s: mdotLox,
