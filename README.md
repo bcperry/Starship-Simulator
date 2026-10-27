@@ -9,7 +9,7 @@ rotating Earth.
 
 ```
 simulator/
-  engine/       Raptor (LOX/CH4) physics model + Streamlit engine GUI
+  engine/       Raptor (LOX/CH4) physics model (throttle, lag, propellant)
   telemetry/    engine<->vehicle wire: schema, publishers, command sources,
                 TelemetryEngine, EngineProcess (one step per command),
                 __main__.py (standalone engine process over Kafka)
@@ -19,7 +19,7 @@ viewer/         TypeScript/React telemetry viewer (full-stack UX foundation)
                 shared/ wire types · server/ (Fastify+SSE, mock|Kafka) · src/
 tests/          pytest suite
 scripts/        engine_demo.py, fleet_demo.py, command_fleet_demo.py,
-                gui_smoke.py, plot.py
+                plot.py
 ```
 
 ## Setup
@@ -165,18 +165,6 @@ The architecture is deliberately composable — `shared/types.ts` (wire schema),
 `server/state.ts` (ring-buffer + snapshot pub/sub), and
 `src/hooks/useFeed.ts` (store→React). Adding a graph, a new panel, a replay
 source, or persistence is a local change. See `viewer/README.md`.
-
-## Engine GUI (Streamlit)
-
-Throttle the Raptor live — thrust, Isp, chamber pressure (actual vs
-demand), LOX/CH4 mass flow, and propellant remaining, in a SpaceX-ish
-dark theme. Engine parameters (chamber P, mixture ratio, throat, area
-ratio, tau, prop load) freeze at RUN; throttle and ambient pressure are
-live sliders.
-
-```
-uv run streamlit run simulator/engine/gui.py
-```
 
 ## How it works
 

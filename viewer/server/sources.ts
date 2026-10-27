@@ -196,11 +196,18 @@ export class KafkaSource implements Source {
       consumer.on(consumer.events.CRASH, (e: { message: string }) =>
         this.log(`consumer(${topic}) crash: ${e.message}`),
       );
+      // kafkajs requires an explicit subscription before `run()` — without it
+      // the consumer joins the group with an empty topic list (topics:[]) and
+      // is assigned no partitions, so it never fetches anything.
+      await consumer.subscribe({ topic, fromBeginning: true });
       await consumer
         .run({
           autoCommit: true,
-          eachBatch: async (payload: TopicPartitionFetchBatch) => {
-            for (const msg of payload.messages) {
+          // kafkajs >= 1.5/2.x delivers the batch nested: { batch, resolveOffset, ... }
+          eachBatch: async (payload: {
+            batch: { messages: { value: Buffer | null }[] };
+          }) => {
+            for (const msg of payload.batch.messages) {
               if (!msg.value) continue;
               const event = toFeedEvent(kind, msg.value);
               if (event) this.emit(event);
@@ -220,8 +227,6 @@ export class KafkaSource implements Source {
     await this.client?.disconnect?.().catch(() => {});
   }
 }
-
-type TopicPartitionFetchBatch = { messages: { value: Buffer | null }[] };
 
 function toFeedEvent(
   kind: "command" | "telemetry",

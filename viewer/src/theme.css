@@ -30,7 +30,9 @@
 html, body, #root { height: 100%; }
 body {
   margin: 0;
-  background: var(--bg) fixed, var(--bg-grad);
+  background-color: var(--bg);
+  background-image: var(--bg-grad);
+  background-attachment: fixed;
   color: var(--ink);
   font-family: var(--font);
   -webkit-font-smoothing: antialiased;

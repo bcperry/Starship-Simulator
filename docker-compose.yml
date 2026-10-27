@@ -32,11 +32,12 @@ services:
       - "9092:9092"   # PLAINTEXT broker endpoint, reachable from the host
     environment:
       # single-node KRaft (broker + controller roles in one process)
+      CLUSTER_ID: "HXmoGWVFTmC2uTDlu8bFPQ=="   # required by cp-kafka entrypoint
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,BROKER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,BROKER://kafka:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       # single-node sensible defaults
@@ -49,7 +50,7 @@ services:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
       test: ["CMD-SHELL",
-             "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
+             "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -71,22 +72,20 @@ services:
       - |
         trap 'exit 0' TERM
         kafka-console-consumer \
-          --bootstrap-server kafka:9092 \
+          --bootstrap-server kafka:9094 \
           --topic starship.engine.command \
-          --consumer.config group.id=sim-watch-commands \
-          --consumer.config auto.offset.reset=earliest \
-          --consumer.config max.poll.interval.ms=600000 \
+          --group sim-watch-commands \
+          --consumer-property auto.offset.reset=earliest \
+          --consumer-property max.poll.interval.ms=600000 \
           --property print.key=true \
-          --property print.line=true \
           --from-beginning | sed -u 's/^/[command]   /' &
         kafka-console-consumer \
-          --bootstrap-server kafka:9092 \
+          --bootstrap-server kafka:9094 \
           --topic starship.engine.telemetry \
-          --consumer.config group.id=sim-watch-telemetry \
-          --consumer.config auto.offset.reset=earliest \
-          --consumer.config max.poll.interval.ms=600000 \
+          --group sim-watch-telemetry \
+          --consumer-property auto.offset.reset=earliest \
+          --consumer-property max.poll.interval.ms=600000 \
           --property print.key=true \
-          --property print.line=true \
           --from-beginning | sed -u 's/^/[telemetry] /' &
         wait
     restart: unless-stopped
@@ -115,21 +114,20 @@ services:
           step=1
           t=0.0
           while true; do
-            for i in $(seq 1 "$ENGINES"); do
-              eid="sh-$(printf '%02d' "$i")"
-              ts_ms=$(date +%s%3N)
+            for i in $$(seq 1 "$$ENGINES"); do
+              eid="sh-$$(printf '%02d' "$$i")"
+              ts_ms=$$(date +%s%3N)
               printf '%s\t{"v":1,"type":"engine.command","vehicle_id":"starship","engine_id":"%s","seq":%d,"t":%s,"dt":%s,"throttle_demand_frac":%s,"ambient_pressure_pa":%d,"ts_ms":%d}\n' \
-                "$eid" "$eid" "$step" "$t" "$DT" "$THR" "$AMBIENT" "$ts_ms"
+                "$$eid" "$$eid" "$$step" "$$t" "$$DT" "$$THR" "$$AMBIENT" "$$ts_ms"
             done
             sleep 0.1
-            step=$((step + 1))
-            t=$(awk -v x="$t" -v d="$DT" 'BEGIN{printf "%.2f", x + d}')
+            step=$$((step + 1))
+            t=$$(awk -v x="$$t" -v d="$$DT" 'BEGIN{printf "%.2f", x + d}')
           done
-        } | kafka-produce-console \
-            --bootstrap-server kafka:9092 \
-            --topic "$TOPIC" \
-            --property parse.key=true \
-            --property key.separator=	
+        } | kafka-console-producer \
+            --bootstrap-server kafka:9094 \
+            --topic "$$TOPIC" \
+            --property parse.key=true
     restart: unless-stopped
 
 volumes:

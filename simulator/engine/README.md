@@ -2,7 +2,7 @@
 
 A parameterizable LOX/CH4 rocket engine model (defaults: **Raptor 2** class,
 ~1.759 MN / ~350 s vacuum) plus the tooling to run it: a quick-print
-demo, a live Streamlit GUI, a Python API for custom loops, and a
+demo, a Python API for custom loops, and a
 telemetry adapter for feeding a vehicle-level sim.
 
 The model is deliberately simple and fast (~8 µs per step including
@@ -23,19 +23,7 @@ uv run python scripts/engine_demo.py
 Prints the rated flows (max mdot, LOX/CH4 split) and SL vs vacuum thrust,
 Isp, exhaust velocity, exit pressure for the default Raptor 2.
 
-### 2. Throttle it live (GUI)
-
-Requires streamlit (already a project dependency):
-
-```
-uv run streamlit run simulator/engine/gui.py
-```
-
-Sliders for throttle and ambient pressure; the engine parameters freeze at
-RUN so you can scrub the throttle ramp and watch chamber pressure chase
-the demand through the first-order lag.
-
-### 3. Call it from Python
+### 2. Call it from Python
 
 ```python
 from simulator.engine import RaptorEngine, run, summary
