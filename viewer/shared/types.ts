@@ -117,6 +117,8 @@ export interface LineSummary {
   summary: string;
   engine_id: string;
   seq: number;
+  state?: string;
+  ts_ms?: number;
 }
 
 export type FeedEvent =

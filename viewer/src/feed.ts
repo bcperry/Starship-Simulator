@@ -41,7 +41,7 @@ export interface FleetPoint extends FleetSummary {
 export type FeedLineKind = "command" | "telemetry" | "ship";
 
 export interface FeedLine {
-  id: number;
+  id: string;
   tsMs: number;
   kind: FeedLineKind;
   engine_id: string;
@@ -95,13 +95,13 @@ class ClientFeed {
   private engines = new Map<string, EngineView>();
   private fleet: FleetPoint[] = [];
   private lines: FeedLine[] = [];
+  private lineMap = new Map<string, FeedLine>();
   private ship: ShipView = { ship: null, history: [], lastAck: null };
   private runId: string | null = null;
   private counts = { command: 0, telemetry: 0, ship: 0, engines: 0 };
   private source: string | null = null;
   private connected = false;
   private lastEventMs = 0;
-  private lineSeq = 0;
   private dirty = true;
 
   private listeners = new Set<() => void>();
@@ -221,7 +221,8 @@ class ClientFeed {
       if (this.runId !== null || rid !== null) {
         this.engines.clear();
         this.fleet.length = 0;
-        this.lines.length = 0;
+        this.lineMap.clear();
+        this.lines = [];
         this.ship = { ...this.ship, ship: snap.ship, history: [] };
         this.counts = { ...snap.counts };
       }
@@ -283,17 +284,41 @@ class ClientFeed {
     }
     this.counts = { ...snap.counts };
 
-    const nowMs = Date.now();
-    this.lines = [...(snap.lines ?? [])]
-      .map((ls, i) => ({
-        id: ++this.lineSeq,
-        tsMs: nowMs,
-        kind: ls.kind,
-        engine_id: ls.engine_id,
-        summary: ls.summary,
-      }))
-      .reverse()
+    // Wire rows: one stable row per (kind, engine) plus one ship row, upserted
+    // in place each snapshot. Stable ids let React update the existing text
+    // nodes instead of remounting the whole list every ~100ms -- that remount
+    // storm (plus the slide-in animation replaying) is what looked like "flash".
+    const keep = new Set<string>();
+    for (const [eid, pair] of Object.entries(snap.latest ?? {})) {
+      if (pair.command) {
+        this.upsertLine("command", eid, pair.command.lineSummary.summary, pair.command.lineSummary.ts_ms ?? Date.now(), keep);
+      }
+      if (pair.telemetry) {
+        this.upsertLine("telemetry", eid, pair.telemetry.lineSummary.summary, pair.telemetry.lineSummary.ts_ms ?? Date.now(), keep);
+      }
+    }
+    if (snap.ship) {
+      const s = snap.ship;
+      const summary = `${s.meco ? "MECO" : "burning"} T+${s.t.toFixed(1)}s · ${(s.thrust_n / 1e6).toFixed(1)} MN · tank ${((s.tank?.frac ?? 0) * 100).toFixed(0)}%`;
+      this.upsertLine("ship", s.vehicle_id, summary, Date.now(), keep);
+    }
+    for (const k of [...this.lineMap.keys()]) if (!keep.has(k)) this.lineMap.delete(k);
+    const rank: Record<string, number> = { command: 0, telemetry: 1, ship: 2 };
+    this.lines = [...this.lineMap.values()]
+      .sort((a, b) => (rank[a.kind] ?? 9) - (rank[b.kind] ?? 9) || (a.engine_id < b.engine_id ? -1 : 1))
       .slice(0, LINE_CAP);
+  }
+
+  private upsertLine(kind: FeedLineKind, engineId: string, summary: string, tsMs: number, keep: Set<string>): void {
+    const id = `${kind}|${engineId}`;
+    keep.add(id);
+    const row = this.lineMap.get(id);
+    if (row) {
+      row.summary = summary;
+      row.tsMs = tsMs;
+    } else {
+      this.lineMap.set(id, { id, kind, engine_id: engineId, summary, tsMs });
+    }
   }
 
   private latestTelemetry(): Map<string, TelemetryMessage> {
