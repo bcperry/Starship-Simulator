@@ -40,7 +40,12 @@ export function useFeed(): FeedData {
 
   const fleet = useMemo(
     () => [...snapshot.fleet].sort((a, b) => a.tsMs - b.tsMs),
-    [snapshot.fleet],
+    // depend on the snapshot object, NOT snapshot.fleet: the feed store
+    // mutates one fleet array in place, so its identity is stable and a
+    // [snapshot.fleet] dep would cache the first (empty) render forever --
+    // which left the "Thrust & propellant flow" panel stuck on
+    // "Collecting trend…" while every other panel updated.
+    [snapshot],
   );
 
   return {

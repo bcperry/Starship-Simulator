@@ -102,6 +102,10 @@ export interface ShipControlMessage {
   lox_kg?: number;
   ch4_kg?: number;
   throttle_frac?: number;
+  /** expected fleet failures over the nominal full-tank burn (0 = failure-free) */
+  expected_failures_per_run?: number;
+  /** raw per-engine hazard rate in 1/s; overrides the calibration when > 0 */
+  fail_hazard_per_s?: number;
 }
 
 export interface ShipAck {

@@ -332,7 +332,9 @@ class ClientFeed {
     return {
       v: this.snap.v + 1,
       engines,
-      fleet: this.fleet,
+      // fresh reference so consumers can memo on identity; the underlying
+      // array is mutated in place and its identity is otherwise stable
+      fleet: [...this.fleet],
       lines: this.lines,
       counts: { ...this.counts },
       ship: this.ship,

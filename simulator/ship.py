@@ -202,16 +202,34 @@ class Ship:
         tank_ox_kg: float | None = None,
         tank_ch4_kg: float | None = None,
         throttle_frac: float | None = None,
+        expected_failures_per_run: float | None = None,
+        fail_hazard_per_s: float | None = None,
     ) -> str:
         """(Re)start a run: re-draw fleet variability and reset tank + states.
 
         Any omitted argument keeps the current value. Returns the new run_id.
+
+        ``expected_failures_per_run`` / ``fail_hazard_per_s`` set the
+        per-launch engine-failure model (exponential time-to-failure):
+        expected fleet failures over the nominal full-tank burn, or the raw
+        hazard rate in 1/s (takes precedence when > 0; pass 0 to clear an
+        earlier override and fall back to the expectation).
         """
         seed = self.seed if seed is None else int(seed)
         n_engines = self.config.n_engines if n_engines is None else int(n_engines)
         vari_frac = self.vari_frac if vari_frac is None else float(vari_frac)
         tank_ox_kg = self.config.tank_ox_kg if tank_ox_kg is None else float(tank_ox_kg)
         tank_ch4_kg = self.config.tank_ch4_kg if tank_ch4_kg is None else float(tank_ch4_kg)
+        expected_failures = (
+            self.config.expected_failures_per_run
+            if expected_failures_per_run is None
+            else float(expected_failures_per_run)
+        )
+        fail_hazard = (
+            self.config.fail_hazard_per_s
+            if fail_hazard_per_s is None
+            else (None if float(fail_hazard_per_s) <= 0.0 else float(fail_hazard_per_s))
+        )
         if throttle_frac is not None:
             self.throttle_cmd = float(throttle_frac)
 
@@ -221,6 +239,10 @@ class Ship:
             raise ValueError(f"n_engines must be >= 1, got {n_engines}")
         if tank_ox_kg < 0.0 or tank_ch4_kg < 0.0:
             raise ValueError("tank masses must be >= 0")
+        if expected_failures < 0.0:
+            raise ValueError(f"expected_failures_per_run must be >= 0, got {expected_failures}")
+        if fail_hazard is not None and fail_hazard < 0.0:
+            raise ValueError(f"fail_hazard_per_s must be >= 0, got {fail_hazard}")
 
         self.config = dataclasses.replace(
             self.config,
@@ -229,6 +251,8 @@ class Ship:
             vari_frac=vari_frac,
             tank_ox_kg=tank_ox_kg,
             tank_ch4_kg=tank_ch4_kg,
+            expected_failures_per_run=expected_failures,
+            fail_hazard_per_s=fail_hazard,
         )
         self.seed = seed
         self.vari_frac = vari_frac
@@ -299,6 +323,8 @@ class Ship:
                 tank_ox_kg=ctrl.get("lox_kg"),
                 tank_ch4_kg=ctrl.get("ch4_kg"),
                 throttle_frac=ctrl.get("throttle_frac"),
+                expected_failures_per_run=ctrl.get("expected_failures_per_run"),
+                fail_hazard_per_s=ctrl.get("fail_hazard_per_s"),
             )
             return {"command": "start_run", "ok": True, "run_id": run_id}
 

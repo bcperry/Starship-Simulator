@@ -17,9 +17,14 @@ export function ControlPanel({ ship, vehicleId }: Props) {
   const [seed, setSeed] = useState("");
   const [nEngines, setNEngines] = useState(33);
   const [vari, setVari] = useState(1);
+  const [failures, setFailures] = useState<number>(2);
+  const [hazard, setHazard] = useState("");
 
   const send = (command: string, payload: Record<string, unknown> = {}) =>
     clientFeed.sendControl({ vehicle_id: vehicleId, command, ...payload });
+
+  const hz = Number.parseFloat(hazard);
+  const hazardActive = Number.isFinite(hz) && hz > 0;
 
   const newSeed = () => {
     const n = Number.parseInt(seed.trim(), 10);
@@ -36,16 +41,20 @@ export function ControlPanel({ ship, vehicleId }: Props) {
       <div className="ctrlrow">
         <button
           className="btn primary"
-          onClick={() =>
-            void send("start_run", {
+          onClick={() => {
+            const payload: Record<string, unknown> = {
               seed: newSeed(),
               n_engines: nEngines,
               vari_frac: vari / 100,
               lox_kg: 5_480_000,
               ch4_kg: 1_520_000,
               throttle_frac: throttle / 100,
-            })
-          }>
+              expected_failures_per_run: Math.max(0, failures),
+              // 0 = clear any raw-hazard override, so the expectation drives the model
+              fail_hazard_per_s: hz > 0 ? hz : 0.0,
+            };
+            void send("start_run", payload);
+          }}>
           {hasRun ? "Restart run" : "Start run"}
         </button>
         <button
@@ -104,6 +113,31 @@ export function ControlPanel({ ship, vehicleId }: Props) {
             value={seed}
             placeholder="e.g. 42 or a name"
             onChange={(e) => setSeed(e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="ctrlrow">
+        <label className={`mini ${hazardActive ? "" : "dim"}`} title={hazardActive ? "raw hazard in use" : "expected failures in use"}>
+          <span>expected failures / run</span>
+          <input
+            type="number"
+            min={0}
+            step={0.5}
+            value={failures}
+            disabled={hazardActive}
+            onChange={(e) => setFailures(Number(e.target.value) || 0)}
+          />
+        </label>
+        <label className={`mini grow ${hazardActive ? "" : "dim"}`}>
+          <span>raw hazard 1/s (empty = auto)</span>
+          <input
+            type="number"
+            min={0}
+            step={0.0001}
+            placeholder={hazardActive ? hz.toExponential(2) : "auto ≈ 1.7e-4"}
+            value={hazard}
+            onChange={(e) => setHazard(e.target.value)}
           />
         </label>
       </div>

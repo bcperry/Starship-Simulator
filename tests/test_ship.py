@@ -338,6 +338,35 @@ def test_failure_docs_are_strict_json():
     assert found, "expected at least one seeded run with a failure"
 
 
+def test_start_run_control_sets_failure_model():
+    """start_run may re-tune the failure model on the wire: expected failures
+    recalibrates the hazard; a raw hazard override wins; 0 disables."""
+    ship = Ship(_cfg(n_engines=33))
+    ship.apply_control(ship_control("sh-test", "start_run", seed=9, expected_failures_per_run=9.0))
+    lam9 = ship._fail_hazard(33, ship.config.tank_ox_kg + ship.config.tank_ch4_kg)
+    lam2 = Ship(_cfg(n_engines=33, expected_failures_per_run=2.0))._fail_hazard(
+        33, ship.config.tank_ox_kg + ship.config.tank_ch4_kg
+    )
+    assert lam9 > lam2 > 0.0
+    # raw hazard override takes precedence over the calibration
+    ship.apply_control(ship_control("sh-test", "start_run", seed=9, fail_hazard_per_s=0.5))
+    assert ship._fail_lambda == pytest.approx(0.5)
+    # expected=0 (with the raw-hazard override cleared) disables the model
+    ship.apply_control(
+        ship_control("sh-test", "start_run", seed=9, expected_failures_per_run=0.0, fail_hazard_per_s=0.0)
+    )
+    assert ship._fail_lambda == 0.0
+    # clearing the override restores the expectation-driven calibration
+    ship.apply_control(
+        ship_control("sh-test", "start_run", seed=9, expected_failures_per_run=2.0, fail_hazard_per_s=0.0)
+    )
+    assert ship._fail_lambda == pytest.approx(lam2)
+    # negative values are rejected
+    for bad in ({"expected_failures_per_run": -1.0}, {"fail_hazard_per_s": -0.5}):
+        with pytest.raises(ValueError):
+            validate_ship_control(to_ship_control("start_run", **bad))
+
+
 def test_zero_expected_failures_gives_failure_free_run():
     ship = _run_to_meco(Ship(_cfg(seed=11, expected_failures_per_run=0.0)))
     assert all(not m.failed for m in ship._members)
