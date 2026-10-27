@@ -1,93 +1,113 @@
-// Server-side feed state: buffers live events, coalesces into 100 ms flushes,
-// and keeps a reconnection snapshot (latest per engine + recent tail).
+/*
+ In-memory fleet state: latest engine.cmd + engine.tel per engine, the newest
+ ship.status, a rolling summary log, and coalesced flushes to SSE clients.
+ */
 
-import type {
+import {
   CommandMessage,
   FeedEvent,
+  LineSummary,
+  ShipStatusMessage,
   TelemetryMessage,
-} from "../shared/types";
+} from "../shared/types.js";
+import type { Source } from "./sources.js";
 
-interface Held {
-  msg: TelemetryMessage | CommandMessage;
-  recv_ms: number;
+export interface Held {
+  lineSummary: LineSummary;
+  message: TelemetryMessage | CommandMessage;
 }
 
-const MAX_TAIL = 400;
-
-export type FeedListener = (batch: FeedEvent[]) => void;
+interface Subscriber {
+  send: (data: string) => void;
+}
 
 export class FeedStore {
-  readonly latestTelemetry = new Map<string, Held>();
-  readonly latestCommand = new Map<string, Held>();
-  readonly counts = { command: 0, telemetry: 0, total: 0 };
+  latestTel = new Map<string, Held>();
+  latestCmd = new Map<string, Held>();
+  ship: ShipStatusMessage | null = null;
+  summaries: LineSummary[] = [];
+  counts = { command: 0, telemetry: 0, ship: 0 };
 
-  private listeners = new Set<FeedListener>();
-  private buffer: FeedEvent[] = [];
-  private timer: NodeJS.Timeout | null = null;
-  private tail: FeedEvent[] = [];
+  private clients = new Set<Subscriber>();
 
-  start(flushMs: number = 100): void {
-    if (this.timer) throw new Error("store already started");
-    this.timer = setInterval(() => this.flush(), flushMs);
-    this.timer.unref();
-  }
-
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    this.flush();
+  constructor(private source: Source) {
+    this.source.start((ev) => this.ingest(ev));
   }
 
   ingest(ev: FeedEvent): void {
-    this.buffer.push(ev);
-    this.counts[ev.kind] += 1;
-    this.counts.total += 1;
-  }
-
-  /** Recent events not yet flushed (used for one-shot snapshots). */
-  get pending(): readonly FeedEvent[] {
-    return this.tail;
-  }
-
-  /** Coalesce buffered events, update "latest" maps, notify subscribers. */
-  flush(): void {
-    if (this.buffer.length === 0) return;
-    const batch = this.buffer;
-    this.buffer = [];
-
-    for (const ev of batch) {
-      if (ev.kind === "telemetry") {
-        this.latestTelemetry.set(ev.engine_id, { msg: ev.msg, recv_ms: ev.recv_ms });
-      } else {
-        this.latestCommand.set(ev.engine_id, { msg: ev.msg, recv_ms: ev.recv_ms });
-      }
-      this.tail.push(ev);
+    if (ev.kind === "ship") {
+      this.ship = ev.message;
+      this.counts.ship += 1;
+    } else if (ev.kind === "command") {
+      this.latestCmd.set(ev.message.engine_id, {
+        lineSummary: ev.lineSummary,
+        message: ev.message,
+      });
+      this.counts.command += 1;
+    } else {
+      this.latestTel.set(ev.message.engine_id, {
+        lineSummary: ev.lineSummary,
+        message: ev.message,
+      });
+      this.counts.telemetry += 1;
     }
-    if (this.tail.length > MAX_TAIL) this.tail.splice(0, this.tail.length - MAX_TAIL);
-
-    for (const fn of this.listeners) fn(batch);
+    this.summaries.push(ev.lineSummary);
+    if (this.summaries.length > 80) this.summaries.shift();
   }
 
-  subscribe(fn: FeedListener): () => void {
-    this.listeners.add(fn);
-    return () => {
-      this.listeners.delete(fn);
+  engineCount(): number {
+    return new Set([...this.latestTel.keys(), ...this.latestCmd.keys()]).size;
+  }
+
+  snapshot() {
+    const ids = new Set([...this.latestTel.keys(), ...this.latestCmd.keys()]);
+    const latest: Record<string, { telemetry?: Held; command?: Held }> = {};
+    for (const id of ids) {
+      latest[id] = {
+        telemetry: this.latestTel.get(id),
+        command: this.latestCmd.get(id),
+      };
+    }
+    return {
+      latest,
+      ship: this.ship,
+      lines: this.summaries.slice(-40),
+      counts: { ...this.counts, engines: this.engineCount() },
+      ts_ms: Date.now(),
     };
   }
 
-  /** Reconnection payload: current best-known state of every engine. */
-  snapshot(): {
-    generated_ms: number;
-    engines: { telemetry?: Held; command?: Held }[];
-  } {
-    const ids = new Set([
-      ...this.latestTelemetry.keys(),
-      ...this.latestCommand.keys(),
-    ]);
-    const engines = [...ids].sort().map((id) => ({
-      telemetry: this.latestTelemetry.get(id),
-      command: this.latestCommand.get(id),
-    }));
-    return { generated_ms: Date.now(), engines };
+  snapshotJSON(): string {
+    return JSON.stringify(this.snapshot());
+  }
+
+  subscribe(c: Subscriber): () => void {
+    this.clients.add(c);
+    c.send(this.snapshotJSON());
+    return () => void this.clients.delete(c);
+  }
+
+  /** Coalesce everything buffered since the last flush to all live clients. */
+  flush(): void {
+    if (this.source.isClosed()) {
+      // ship process died (MECO exit / killed) -- respawn it, fresh run
+      this.source.restart((ev) => this.ingest(ev));
+    }
+    if (this.clients.size === 0) return;
+    const snap = this.snapshotJSON();
+    for (const c of this.clients) c.send(snap);
+  }
+
+  sendControl(msg: Parameters<Source["sendControl"]>[0]): Promise<unknown> {
+    // Normalise to the full ship.control wire doc once, for every transport:
+    // callers may post a bare { command, ...args } body (browser, curl, relay).
+    const body: Record<string, unknown> = {
+      v: 1,
+      type: "ship.control",
+      vehicle_id: "starship",
+      ts_ms: Date.now(),
+      ...(msg as unknown as Record<string, unknown>),
+    };
+    return this.source.sendControl(body as never);
   }
 }

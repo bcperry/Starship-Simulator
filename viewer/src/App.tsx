@@ -4,11 +4,13 @@ import type { TelemetryMessage } from "@shared/types";
 
 import { useFeed } from "./hooks/useFeed";
 
+import { ControlPanel } from "./components/ControlPanel";
 import { EngineGrid } from "./components/EngineGrid";
 import { FlameIcon, PauseIcon, PlayIcon, RocketIcon } from "./components/Icons";
 import { FleetBoard } from "./components/FleetBoard";
 import { MessageFeed } from "./components/MessageFeed";
 import { Panel } from "./components/Panel";
+import { ShipPanel } from "./components/ShipPanel";
 import { TrendChart } from "./components/TrendChart";
 import { fleetSummary } from "./lib/aggregate";
 import { clock } from "./lib/format";
@@ -36,7 +38,7 @@ export default function App() {
             <RocketIcon style={{ color: "var(--accent)" }} />
           </span>
           <div>
-            <h1>Starship · Engine Telemetry</h1>
+            <h1>Starship · Ship + Engine</h1>
             <div className="sub mono">
               {source ? `${source === "mock" ? "synthetic feed (mock)" : "kafka broker"} · ${
                 summary.engine_count
@@ -73,6 +75,17 @@ export default function App() {
 
       <div className="grid">
         <div className="col">
+          <Panel title="Run control" hint="new run · throttle · MECO — drives the ship sim">
+            <ControlPanel ship={snapshot.ship} vehicleId={`starship`} />
+          </Panel>
+
+          <Panel title="Ship — shared propellant" hint="one LOX + one CH₄ tank feeds every engine"
+            right={<span className={`${snapshot.ship.ship?.meco ? "dim" : "livepill"}`}>
+              {snapshot.ship.ship ? (snapshot.ship.ship.meco ? "MECO" : "burning") : "standby"}
+            </span>}>
+            <ShipPanel ship={snapshot.ship} />
+          </Panel>
+
           <Panel title="Fleet status" hint="derived from latest per-engine telemetry"
             right={<span className={`${summary.any_cut ? "" : "dim"} small`}>
               {summary.any_cut ? "⚠ propellant shortage detected" : "all nominal"}

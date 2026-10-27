@@ -1,23 +1,14 @@
-// Wire types — TS mirrors of simulator/telemetry/messages.py (schema v1).
-// Keep in sync with the Python side; the server validates `v` and `type`.
+// Shared wire types for the telemetry viewer (mirrors simulator/telemetry/messages.py).
 
-export const SCHEMA_VERSION = 1;
 export const ENGINE_TELEMETRY = "engine.telemetry";
-export const FLEET_TELEMETRY = "fleet.telemetry";
 export const ENGINE_COMMAND = "engine.command";
-
-export type EngineStateWord = "idle" | "firing" | "cut";
+export const SHIP_STATUS = "ship.status"; // ship loop -> viewers: shared fuel + run state
+export const SHIP_CONTROL = "ship.control"; // operator -> ship loop: start_run / throttle / meco
 
 export interface MDot {
   total: number;
   lox: number;
   ch4: number;
-}
-
-export interface Exhaust {
-  velocity_m_s: number;
-  exit_pressure_pa: number;
-  exit_mach: number;
 }
 
 export interface TelemetryMessage {
@@ -28,17 +19,18 @@ export interface TelemetryMessage {
   seq: number;
   t: number;
   ts_ms: number;
-  state: EngineStateWord;
+  state: "idle" | "firing" | "cut";
   throttle_demand_frac: number;
   throttle_actual_frac: number;
   chamber_pressure_pa: number;
   thrust_n: number;
   isp_s: number;
   mdot_kg_s: MDot;
-  exhaust: Exhaust;
+  exhaust: { velocity_m_s: number; exit_pressure_pa: number; exit_mach: number };
   propellant_remaining_kg: number;
   ambient_pressure_pa: number;
   command_seq: number;
+  run_id?: string; // ship run this step belongs to (absent = standalone engine)
 }
 
 export interface CommandMessage {
@@ -52,29 +44,82 @@ export interface CommandMessage {
   throttle_demand_frac: number;
   ambient_pressure_pa: number;
   ts_ms: number;
+  run_id?: string;
 }
 
-export interface FleetRow {
+export interface ShipTank {
+  lox_kg: number;
+  ch4_kg: number;
+  lox_frac: number;
+  ch4_frac: number;
+  total_kg: number;
+  total_initial_kg: number;
+  frac: number; // fraction of the initial shared load remaining
+  limited?: "lox" | "ch4" | "both" | null;
+}
+
+export interface ShipStatusMessage {
   v: number;
-  type: typeof FLEET_TELEMETRY;
-  t_sim: number;
+  type: typeof SHIP_STATUS;
+  vehicle_id: string;
+  run_id: string;
+  seq: number;
+  t: number;
   ts_ms: number;
-  engine_count: number;
+  n_engines: number;
   firing_count: number;
   cut_count: number;
   all_firing: boolean;
-  any_cut: boolean;
+  vari_frac: number;
+  seed?: string | number | null;
   thrust_n: number;
-  mdot_kg_s: MDot;
-  min_propellant_remaining_kg: number;
-  min_isp_s: number;
-  min_chamber_pressure_pa: number;
-  engine_ids: string[];
+  thrust_min_n?: number;
+  thrust_max_n?: number;
+  thrust_spread_frac?: number;
+  mdot_kg_s: { total: number; lox?: number; ch4?: number };
+  tank: ShipTank;
+  meco: boolean;
+  meco_t?: number | null;
+  throttle_cmd_frac?: number;
+  mixture_ratio?: number;
 }
 
-/** Envelope the SSE stream carries per record. */
-export type FeedEvent =
-  | { kind: "telemetry"; engine_id: string; msg: TelemetryMessage; recv_ms: number }
-  | { kind: "command"; engine_id: string; msg: CommandMessage; recv_ms: number };
+export type ShipControlCommand = "start_run" | "throttle" | "meco";
 
-export type SourceName = "kafka" | "mock";
+export interface ShipControlMessage {
+  v: number;
+  type: typeof SHIP_CONTROL;
+  vehicle_id: string;
+  command: ShipControlCommand;
+  ts_ms?: number;
+  seed?: string | number;
+  vari_frac?: number;
+  n_engines?: number;
+  lox_kg?: number;
+  ch4_kg?: number;
+  throttle_frac?: number;
+}
+
+export interface ShipAck {
+  type: "ship.ack";
+  command?: string;
+  ok: boolean;
+  run_id?: string;
+  throttle_frac?: number;
+  reason?: string;
+  error?: string;
+  ts_ms?: number;
+}
+
+export interface LineSummary {
+  kind: "command" | "telemetry" | "ship";
+  t: number;
+  summary: string;
+  engine_id: string;
+  seq: number;
+}
+
+export type FeedEvent =
+  | ({ kind: "command"; message: CommandMessage } & { lineSummary: LineSummary })
+  | ({ kind: "telemetry"; message: TelemetryMessage } & { lineSummary: LineSummary })
+  | ({ kind: "ship"; message: ShipStatusMessage } & { lineSummary: LineSummary });

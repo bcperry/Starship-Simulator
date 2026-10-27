@@ -32,6 +32,7 @@ exhaust                   obj    {"velocity_m_s","exit_pressure_pa","exit_mach"}
 propellant_remaining_kg   float  kg left on this engine (0 if unlimited load)
 ambient_pressure_pa       float  ambient passed in for this step, Pa
 command_seq               int    seq of the engine.command this step answered (0 = direct step)
+run_id                    str?   ship run this step belongs to (absent = standalone engine)
 
 Command layout (v=1, vehicle -> engine, type "engine.command")
 --------------------------------------------------------------
@@ -44,6 +45,26 @@ dt                        float  integration step the engine must take, s (vehic
 throttle_demand_frac      float  commanded throttle, 0..1.5
 ambient_pressure_pa       float  commanded ambient, Pa
 ts_ms                     int    wall-clock creation, epoch ms
+run_id                    str?   ship run this command belongs to (absent = standalone)
+
+Ship status and control (type "ship.status" / "ship.control")
+--------------------------------------------------------------
+The SHIP (vehicle sim) owns the shared propellant tank: LOX and CH4 are
+shared across ALL engines, so the ship tracks the tank and feeds it per
+cycle (consuming what the engines actually burned from their outputs).
+
+ship.status: one doc per cycle with the shared tank state
+  {
+    "lox_kg", "ch4_kg", "total_kg", "total_initial_kg", "frac"
+  }, fleet totals (thrust, mdot, firing/cut counts), and run identity
+  (run_id, seed, vari_frac) -- the source of truth for "how much fuel is
+  left on the vehicle".
+
+ship.control: operator -> ship loop
+  command                 str    "start_run" | "throttle" | "meco"
+  start_run args (any subset)  seed, vari_frac, n_engines, lox_kg, ch4_kg, throttle_frac
+  throttle args           throttle_frac (0..1.5)
+  meco args               (none)
 
 The command stream is the clock: an engine process takes exactly one physics
 step per command, in order. The vehicle sends N commands per step (one per
@@ -54,7 +75,7 @@ the telemetry direction.
 from __future__ import annotations
 
 import time
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from ..engine import EngineOutput, RaptorEngine
 
@@ -64,6 +85,8 @@ SCHEMA_VERSION = 1
 ENGINE_TELEMETRY = "engine.telemetry"  # one engine -> vehicle
 FLEET_TELEMETRY = "fleet.telemetry"    # vehicle-level, aggregated per step
 ENGINE_COMMAND = "engine.command"      # vehicle -> one engine
+SHIP_STATUS = "ship.status"            # ship loop -> viewers: shared fuel + run state
+SHIP_CONTROL = "ship.control"          # operator -> ship loop: start_run / throttle / meco
 
 # engine-state words (human-readable in JSON; stable strings, not ints)
 STATE_IDLE = "idle"
@@ -95,6 +118,7 @@ class TelemetryMessage(TypedDict):
     propellant_remaining_kg: float
     ambient_pressure_pa: float
     command_seq: int
+    run_id: NotRequired[str]  # ship run this step belongs to (absent = standalone)
 
 
 class CommandMessage(TypedDict):
@@ -110,6 +134,70 @@ class CommandMessage(TypedDict):
     throttle_demand_frac: float
     ambient_pressure_pa: float
     ts_ms: int
+    run_id: NotRequired[str]  # ship run this command belongs to (absent = standalone)
+
+
+class ShipStatusMessage(TypedDict, total=False):
+    """Ship per-cycle state: shared tank + fleet totals + run identity.
+
+    ``tank`` is {"lox_kg", "ch4_kg", "lox_frac", "ch4_frac", "total_kg",
+    "total_initial_kg", "frac", "limited"} where each ``*_frac`` is that
+    tank's remaining fraction of its initial load and ``limited`` is which
+    tank will empty first ("lox"/"ch4"/"both") or None while both are healthy.
+    ``thrust_min_n``/``thrust_max_n``/``thrust_spread_frac`` describe the
+    per-engine fan-out of the current total; ``mixture_ratio`` is the
+    ship-level LOX/CH4 demand ratio.
+    """
+
+    v: int
+    type: str
+    vehicle_id: str
+    run_id: str
+    seq: int
+    t: float
+    ts_ms: int
+    n_engines: int
+    firing_count: int
+    cut_count: int
+    all_firing: bool
+    thrust_n: float
+    thrust_min_n: float
+    thrust_max_n: float
+    thrust_spread_frac: float
+    mdot_kg_s: dict[str, float]
+    tank: dict[str, float | None | str]
+    meco: bool
+    meco_t: float | None
+    throttle_cmd_frac: float
+    seed: int
+    vari_frac: float
+    mixture_ratio: float
+
+
+#: valid ship.control verbs
+SHIP_CONTROL_COMMANDS = ("start_run", "throttle", "meco")
+
+
+class ShipControlMessage(TypedDict, total=False):
+    """Operator -> ship loop. ``command`` picks the verb; the rest are args.
+
+    - start_run: seed?, vari_frac?, n_engines?, lox_kg?, ch4_kg?, throttle_frac?
+    - throttle:  throttle_frac
+    - meco:      (none)
+    """
+
+    v: int
+    type: str
+    vehicle_id: str
+    command: str
+    ts_ms: int
+    # start_run / throttle arguments
+    seed: int
+    vari_frac: float
+    n_engines: int
+    lox_kg: float
+    ch4_kg: float
+    throttle_frac: float
 
 
 def engine_state(engine: RaptorEngine, out: EngineOutput) -> str:
@@ -273,3 +361,136 @@ def validate_command(
         raise ValueError(f"negative ambient_pressure_pa: {cm.get('ambient_pressure_pa')}")
 
     return cm
+
+
+def to_ship_status(
+    *,
+    vehicle_id: str,
+    run_id: str,
+    seq: int,
+    t: float,
+    n_engines: int,
+    firing_count: int,
+    cut_count: int,
+    thrust_n: float,
+    mdot_kg_s: dict[str, float],
+    tank_ox_kg: float,
+    tank_ch4_kg: float,
+    tank_total_initial_kg: float,
+    meco: bool,
+    meco_t: float | None,
+    throttle_cmd_frac: float,
+    seed: int,
+    vari_frac: float,
+    ts_ms: int | None = None,
+    tank_ox0_kg: float | None = None,
+    tank_ch40_kg: float | None = None,
+    thrust_min_n: float | None = None,
+    thrust_max_n: float | None = None,
+    mixture_ratio: float | None = None,
+) -> ShipStatusMessage:
+    """Build one ship per-cycle status document (shared fuel + run state)."""
+    total = max(0.0, tank_ox_kg + tank_ch4_kg)
+    frac = (total / tank_total_initial_kg) if tank_total_initial_kg > 0.0 else 0.0
+
+    tank: dict[str, float | None | str] = {
+        "lox_kg": max(0.0, float(tank_ox_kg)),
+        "ch4_kg": max(0.0, float(tank_ch4_kg)),
+        "total_kg": total,
+        "total_initial_kg": float(tank_total_initial_kg),
+        "frac": frac,
+    }
+    if tank_ox0_kg is not None and tank_ox0_kg > 0.0:
+        tank["lox_frac"] = max(0.0, float(tank_ox_kg)) / tank_ox0_kg
+    if tank_ch40_kg is not None and tank_ch40_kg > 0.0:
+        tank["ch4_frac"] = max(0.0, float(tank_ch4_kg)) / tank_ch40_kg
+    loxf = tank.get("lox_frac")
+    ch4f = tank.get("ch4_frac")
+    if loxf is not None and ch4f is not None:
+        if loxf <= 1e-9 and ch4f <= 1e-9:
+            tank["limited"] = "both"
+        elif ch4f <= 1e-9 or (loxf < ch4f and loxf <= 0.02):
+            tank["limited"] = "lox"
+        elif loxf <= 1e-9 or (ch4f < loxf and ch4f <= 0.02):
+            tank["limited"] = "ch4"
+        else:
+            tank["limited"] = None
+
+    doc: ShipStatusMessage = {
+        "v": SCHEMA_VERSION,
+        "type": SHIP_STATUS,
+        "vehicle_id": vehicle_id,
+        "run_id": run_id,
+        "seq": seq,
+        "t": float(t),
+        "ts_ms": ts_ms if ts_ms is not None else int(time.time_ns() // 1_000_000),
+        "n_engines": int(n_engines),
+        "firing_count": int(firing_count),
+        "cut_count": int(cut_count),
+        "all_firing": (n_engines > 0 and firing_count == n_engines),
+        "thrust_n": max(0.0, float(thrust_n)),
+        "mdot_kg_s": {k: float(v) for k, v in mdot_kg_s.items()},
+        "tank": tank,
+        "meco": bool(meco),
+        "meco_t": float(meco_t) if meco_t is not None else None,
+        "throttle_cmd_frac": float(throttle_cmd_frac),
+        "seed": int(seed),
+        "vari_frac": float(vari_frac),
+    }
+    if thrust_min_n is not None and thrust_max_n is not None:
+        tmin, tmax = float(thrust_min_n), float(thrust_max_n)
+        doc["thrust_min_n"] = max(0.0, tmin)
+        doc["thrust_max_n"] = max(0.0, tmax)
+        doc["thrust_spread_frac"] = (
+            (tmax - tmin) / tmax if tmax > 0.0 else 0.0
+        )
+    if mixture_ratio is not None and mixture_ratio > 0.0:
+        doc["mixture_ratio"] = float(mixture_ratio)
+    return doc
+
+
+def to_ship_control(
+    command: str,
+    vehicle_id: str = "starship",
+    ts_ms: int | None = None,
+    **args: float,
+) -> ShipControlMessage:
+    """Build a ship.control document. Extra kwargs become that verb's arguments."""
+    if command not in SHIP_CONTROL_COMMANDS:
+        raise ValueError(f"unknown ship control command: {command!r}")
+    msg = ShipControlMessage(
+        v=SCHEMA_VERSION,
+        type=SHIP_CONTROL,
+        vehicle_id=vehicle_id,
+        command=command,
+        ts_ms=ts_ms if ts_ms is not None else int(time.time_ns() // 1_000_000),
+    )
+    for key, value in args.items():
+        if key in ("seed", "n_engines"):
+            msg[key] = int(value)  # type: ignore[literal-required]
+        else:
+            msg[key] = float(value)  # type: ignore[literal-required]
+    return msg
+
+
+def validate_ship_control(cm: dict) -> ShipControlMessage:
+    """Structural + range check for a ship.control doc; raises ValueError."""
+    if cm.get("type") != SHIP_CONTROL:
+        raise ValueError(f"not a ship control message: type={cm.get('type')!r}")
+    if cm.get("v") != SCHEMA_VERSION:
+        raise ValueError(f"unsupported ship control schema version: {cm.get('v')!r}")
+    command = cm.get("command")
+    if command not in SHIP_CONTROL_COMMANDS:
+        raise ValueError(f"unknown ship control command: {command!r}")
+    if command in ("start_run", "throttle") and "throttle_frac" in cm:
+        thr = float(cm["throttle_frac"])
+        if not 0.0 <= thr <= 1.5:
+            raise ValueError(f"throttle_frac out of range [0, 1.5]: {thr}")
+    if command == "start_run":
+        if cm.get("n_engines") is not None and int(cm["n_engines"]) < 1:
+            raise ValueError("n_engines must be >= 1")
+        if float(cm.get("lox_kg", 0.0)) < 0.0 or float(cm.get("ch4_kg", 0.0)) < 0.0:
+            raise ValueError("tank masses must be >= 0")
+        if float(cm.get("vari_frac", 0.0)) > 0.5:
+            raise ValueError("vari_frac must be <= 0.5")
+    return cm  # type: ignore[return-value]

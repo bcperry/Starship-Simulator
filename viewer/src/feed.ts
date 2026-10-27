@@ -1,14 +1,20 @@
-// Client feed store: keeps an EventSource open to /api/stream, folds every
-// event into (a) per-engine latest/history state, (b) a fleet trend point per
-// flush, (c) a raw message log. Exposes a stable snapshot per flush so React
-// can useSyncExternalStore without re-rendering per message.
+// Client feed store: keeps an EventSource open to /api/stream, and folds each
+// server snapshot into (a) per-engine latest + history, (b) a ship fuel/trend
+// series, (c) a message log. Coalesced to ~10 Hz so React renders cheaply.
 
 import { fleetSummary, type FleetSummary } from "./lib/aggregate";
 import type {
   CommandMessage,
-  FeedEvent,
+  LineSummary,
+  ShipAck,
+  ShipStatusMessage,
   TelemetryMessage,
 } from "@shared/types";
+
+const HISTORY_CAP = 480;
+const FLEET_CAP = 900;
+const SHIP_CAP = 900;
+const LINE_CAP = 200;
 
 export interface SeriesPoint {
   t: number;
@@ -32,7 +38,7 @@ export interface FleetPoint extends FleetSummary {
   t: number;
 }
 
-export type FeedLineKind = "command" | "telemetry";
+export type FeedLineKind = "command" | "telemetry" | "ship";
 
 export interface FeedLine {
   id: number;
@@ -40,7 +46,20 @@ export interface FeedLine {
   kind: FeedLineKind;
   engine_id: string;
   summary: string;
-  raw: FeedEvent;
+}
+
+export interface ShipPoint {
+  t: number;
+  thrust_n: number;
+  tank_frac: number;
+  mdot_kg_s: number;
+  meco: boolean;
+}
+
+export interface ShipView {
+  ship: ShipStatusMessage | null;
+  history: ShipPoint[];
+  lastAck: ShipAck | null;
 }
 
 export interface Snapshot {
@@ -48,76 +67,62 @@ export interface Snapshot {
   engines: EngineView[];
   fleet: FleetPoint[];
   lines: FeedLine[];
-  counts: { command: number; telemetry: number };
+  counts: { command: number; telemetry: number; ship: number; engines: number };
+  ship: ShipView;
   source: string | null;
   connected: boolean;
   lastEventMs: number;
   paused: boolean;
 }
 
-const HISTORY_CAP = 480; // ~48 s at 10 Hz
-const FLEET_CAP = 900;
-const LINE_CAP = 400;
-const PENDING_CAP = 4000;
-
-function summarize(ev: FeedEvent): string {
-  if (ev.kind === "command") {
-    const c = ev.msg;
-    return `${c.engine_id} → ${Math.round(c.throttle_demand_frac * 100)}% @ t=${c.t}s (seq ${c.seq})`;
-  }
-  const m = ev.msg;
-  return `${m.engine_id} ${m.state} ${((m.thrust_n / 1e6).toFixed(2))} MN ${(m.chamber_pressure_pa / 1e6).toFixed(1)} MPa (seq ${m.seq})`;
+interface ServerHeld {
+  lineSummary: LineSummary;
+  message: TelemetryMessage | CommandMessage;
 }
 
-interface HeldSnapshot {
-  generated_ms: number;
-  engines: { telemetry?: { msg: any; recv_ms: number }; command?: { msg: any; recv_ms: number } }[];
-}
-
-interface ServerPayload {
-  type: string;
-  source?: string;
-  snapshot?: HeldSnapshot;
-  tail?: FeedEvent[];
-  events?: FeedEvent[];
+interface ServerSnapshot {
+  latest: Record<string, { telemetry?: ServerHeld; command?: ServerHeld }>;
+  ship: ShipStatusMessage | null;
+  lines: LineSummary[];
+  counts: { command: number; telemetry: number; ship: number; engines: number };
+  ts_ms: number;
 }
 
 class ClientFeed {
   private es: EventSource | null = null;
-  private dirty = false;
-  private pausedFlag = false;
-  private pending: FeedEvent[] = [];
+  pausedFlag = false;
 
   private engines = new Map<string, EngineView>();
   private fleet: FleetPoint[] = [];
   private lines: FeedLine[] = [];
-  private counts = { command: 0, telemetry: 0 };
+  private ship: ShipView = { ship: null, history: [], lastAck: null };
+  private runId: string | null = null;
+  private counts = { command: 0, telemetry: 0, ship: 0, engines: 0 };
   private source: string | null = null;
   private connected = false;
   private lastEventMs = 0;
   private lineSeq = 0;
-  private fleetDirty = false;
-  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private dirty = true;
+
+  private listeners = new Set<() => void>();
 
   private snap: Snapshot = {
     v: 0,
     engines: [],
     fleet: [],
     lines: [],
-    counts: { command: 0, telemetry: 0 },
+    counts: { command: 0, telemetry: 0, ship: 0, engines: 0 },
+    ship: { ship: null, history: [], lastAck: null },
     source: null,
     connected: false,
     lastEventMs: 0,
     paused: false,
   };
 
-  // ---- lifecycle ------------------------------------------------------
-
   connect(): void {
     if (this.es) return;
     const es = new EventSource("/api/stream");
     this.es = es;
-
     es.onopen = () => {
       this.connected = true;
       this.markDirty();
@@ -125,30 +130,22 @@ class ClientFeed {
     es.onerror = () => {
       this.connected = false;
       this.markDirty();
-      // EventSource auto-reconnects (server sends `retry: 3000`)
     };
     es.onmessage = (e) => {
-      let payload: ServerPayload;
+      let snap: ServerSnapshot;
       try {
-        payload = JSON.parse(e.data) as ServerPayload;
+        snap = JSON.parse(e.data) as ServerSnapshot;
       } catch {
-        return;
+        return; // heartbeat etc.
       }
-      this.lastEventMs = Date.now();
-      if (payload.type === "hello") {
-        if (payload.source) this.source = payload.source;
-        if (payload.snapshot) this.seed(payload.snapshot);
-        if (payload.tail) for (const ev of payload.tail) this.apply(ev);
-        this.markDirty();
-      } else if (payload.type === "events") {
-        for (const ev of payload.events ?? []) this.apply(ev);
+      if (typeof snap?.ts_ms !== "number") return;
+      if ("latest" in snap) {
+        this.apply(snap);
         this.markDirty();
       }
     };
 
-    // flush loop (10 Hz) so React renders at most once per flush
     const flush = setInterval(() => {
-      this.flushPending();
       if (this.fleetDirty) {
         this.fleetDirty = false;
         const any = [...this.engines.values()].find((v) => v.telemetry);
@@ -166,6 +163,16 @@ class ClientFeed {
       }
     }, 100);
     this.flushTimer = flush;
+
+    void fetch("/api/health")
+      .then((r) => r.json())
+      .then((h) => {
+        if (h?.source) {
+          this.source = h.source;
+          this.markDirty();
+        }
+      })
+      .catch(() => {});
   }
 
   disconnect(): void {
@@ -175,95 +182,118 @@ class ClientFeed {
     this.flushTimer = null;
   }
 
-  pause(): void {
+  pause() {
     this.pausedFlag = true;
     this.markDirty();
   }
 
-  resume(): void {
+  resume() {
     this.pausedFlag = false;
     this.markDirty();
   }
 
-  // ---- data application -----------------------------------------------
-
-  private seed(snap: HeldSnapshot): void {
-    // Reset state on a fresh connection's prime payload.
-    this.engines.clear();
-    this.fleet.length = 0;
-    this.lines.length = 0;
-    this.counts = { command: 0, telemetry: 0 };
-    for (const e of snap.engines) {
-      const v: EngineView = {
-        id: e.telemetry?.msg?.engine_id ?? e.command?.msg?.engine_id ?? "?",
-        telemetry: e.telemetry?.msg ?? null,
-        command: e.command?.msg ?? null,
-        history: [],
-        lastRecvMs: e.telemetry?.recv_ms ?? e.command?.recv_ms ?? 0,
-      };
-      if (v.telemetry) {
-        const m = v.telemetry;
-        v.history.push({
-          t: m.t,
-          seq: m.seq,
-          thrust: m.thrust_n,
-          pc: m.chamber_pressure_pa,
-          mdot: m.mdot_kg_s.total,
-          state: m.state,
-        });
-      }
-      this.engines.set(v.id, v);
+  async sendControl(msg: Record<string, unknown>): Promise<ShipView["lastAck"]> {
+    let ack: NonNullable<ShipView["lastAck"]> | null = null;
+    try {
+      const r = await fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(msg),
+      });
+      ack = (await r.json()) as NonNullable<ShipView["lastAck"]>;
+      ack.ts_ms = Date.now();
+    } catch (e) {
+      ack = { ok: false, error: (e as Error).message, ts_ms: Date.now() } as ShipAck;
     }
+    this.ship = { ...this.ship, lastAck: ack };
+    this.markDirty();
+    return ack;
   }
 
-  private apply(ev: FeedEvent): void {
-    if (this.pausedFlag) {
-      this.pending.push(ev);
-      if (this.pending.length > PENDING_CAP) this.pending.shift();
-      return;
-    }
-    const key = ev.engine_id;
-    const v = this.engines.get(key) ?? {
-      id: key,
-      telemetry: null,
-      command: null,
-      history: [],
-      lastRecvMs: 0,
-    };
-    v.lastRecvMs = ev.recv_ms;
+  // ---- data application ------------------------------------------------
 
-    if (ev.kind === "telemetry") {
-      const m = ev.msg;
-      v.telemetry = m;
-      const last = v.history[v.history.length - 1];
-      if (!last || m.seq > last.seq) {
-        v.history.push({
-          t: m.t,
-          seq: m.seq,
-          thrust: m.thrust_n,
-          pc: m.chamber_pressure_pa,
-          mdot: m.mdot_kg_s.total,
-          state: m.state,
-        });
-        if (v.history.length > HISTORY_CAP) v.history.shift();
+  private apply(snap: ServerSnapshot): void {
+    this.lastEventMs = Date.now();
+
+    // A new ship run resets the board.
+    const rid = snap.ship?.run_id ?? null;
+    if (rid !== this.runId) {
+      if (this.runId !== null || rid !== null) {
+        this.engines.clear();
+        this.fleet.length = 0;
+        this.lines.length = 0;
+        this.ship = { ...this.ship, ship: snap.ship, history: [] };
+        this.counts = { ...snap.counts };
       }
-      this.counts.telemetry += 1;
-    } else {
-      v.command = ev.msg;
-      this.counts.command += 1;
+      this.runId = rid;
     }
-    this.fleetDirty = true;
-    this.engines.set(key, v);
 
-    this.lines.unshift({
-      id: ++this.lineSeq,
-      tsMs: ev.recv_ms,
-      kind: ev.kind,
-      engine_id: key,
-      summary: summarize(ev),
-      raw: ev,
-    });
-    if (this.lines.length > LINE_CAP) this.lines.length = LINE_CAP;
+    const now = Date.now();
+    const seen = new Set<string>();
+    for (const [id, pair] of Object.entries(snap.latest ?? {})) {
+      seen.add(id);
+      const v = this.engines.get(id) ?? {
+        id,
+        telemetry: null,
+        command: null,
+        history: [],
+        lastRecvMs: 0,
+      };
+      v.lastRecvMs = now;
+      v.command = pair.command?.message as CommandMessage | null;
+      const m = pair.telemetry?.message as TelemetryMessage | null;
+      v.telemetry = m;
+      if (m) {
+        const last = v.history[v.history.length - 1];
+        if (!last || m.seq > last.seq) {
+          v.history.push({
+            t: m.t,
+            seq: m.seq,
+            thrust: m.thrust_n,
+            pc: m.chamber_pressure_pa,
+            mdot: m.mdot_kg_s.total,
+            state: m.state,
+          });
+          if (v.history.length > HISTORY_CAP) v.history.shift();
+          this.fleetDirty = true;
+        }
+      }
+      this.engines.set(id, v);
+    }
+    for (const id of [...this.engines.keys()]) {
+      if (!seen.has(id)) this.engines.delete(id);
+    }
+
+    if (snap.ship) {
+      const s = snap.ship;
+      const point: ShipPoint = {
+        t: s.t,
+        thrust_n: s.thrust_n,
+        tank_frac: s.tank.frac,
+        mdot_kg_s: s.mdot_kg_s?.total ?? 0,
+        meco: s.meco,
+      };
+      const last = this.ship.history[this.ship.history.length - 1];
+      if (!last || s.seq > this.lastShipSeq) {
+        this.ship.history = [...this.ship.history, point];
+        if (this.ship.history.length > SHIP_CAP) this.ship.history = this.ship.history.slice(-SHIP_CAP);
+      }
+      this.lastShipSeq = s.seq;
+      this.ship = { ...this.ship, ship: s };
+    }
+    this.counts = { ...snap.counts };
+
+    const nowMs = Date.now();
+    this.lines = [...(snap.lines ?? [])]
+      .map((ls, i) => ({
+        id: ++this.lineSeq,
+        tsMs: nowMs,
+        kind: ls.kind,
+        engine_id: ls.engine_id,
+        summary: ls.summary,
+      }))
+      .reverse()
+      .slice(0, LINE_CAP);
   }
 
   private latestTelemetry(): Map<string, TelemetryMessage> {
@@ -272,24 +302,15 @@ class ClientFeed {
     return map;
   }
 
-  private flushPending(): void {
-    if (this.pausedFlag || this.pending.length === 0) return;
-    const batch = this.pending.splice(0, this.pending.length);
-    for (const ev of batch) this.apply(ev);
-  }
-
-  // ---- snapshot for React ----------------------------------------------
-
   private rebuildSnapshot(): Snapshot {
-    const engines = [...this.engines.values()].sort((a, b) =>
-      a.id < b.id ? -1 : 1,
-    );
+    const engines = [...this.engines.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
     return {
       v: this.snap.v + 1,
       engines,
       fleet: this.fleet,
       lines: this.lines,
       counts: { ...this.counts },
+      ship: this.ship,
       source: this.source,
       connected: this.connected,
       lastEventMs: this.lastEventMs,
@@ -297,16 +318,19 @@ class ClientFeed {
     };
   }
 
+  private fleetDirty = false;
+  private lastShipSeq = 0;
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+
+  private markDirty() {
+    this.dirty = true;
+    for (const fn of this.listeners) fn();
+  }
+
   subscribe = (fn: () => void): (() => void) => {
     this.listeners.add(fn);
-    return () => this.listeners.delete(fn);
+    return () => void this.listeners.delete(fn);
   };
-
-  private listeners = new Set<() => void>();
-
-  private markDirty(): void {
-    this.dirty = true;
-  }
 
   getSnapshot = (): Snapshot => this.snap;
 }

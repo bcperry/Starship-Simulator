@@ -1,15 +1,13 @@
 // Starship sim viewer — server.
 //
-//   SOURCE=mock  npm start          # in-UX mode: synthetic 33-engine fleet
-//   SOURCE=kafka npm start          # real mode: consume the two Kafka topics
+//   SOURCE=mock   -> spawns the real Python ship sim (stdio), full run control
+//   SOURCE=kafka  -> consumes real topics, control produced to the control topic
 //
 // API:
-//   GET /api/health   liveness + feed state
-//   GET /api/state    snapshot for (re)connecting clients
-//   GET /api/stream   Server-Sent Events: event batches + heartbeats
-//
-// Serves the built web app from ../dist when present (production), otherwise
-// expects the Vite dev server (with its /api proxy) in front.
+//   GET  /api/health    liveness + feed state
+//   GET  /api/state     snapshot for (re)connecting clients
+//   GET  /api/stream    Server-Sent Events: snapshot flushes + heartbeats
+//   POST /api/control   ship.control command (start_run / throttle / meco)
 
 import { readdir } from "node:fs/promises";
 import path from "node:path";
@@ -18,55 +16,63 @@ import { fileURLToPath } from "node:url";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 
-import type { FeedEvent } from "../shared/types";
+import type { ShipControlMessage } from "../shared/types.js";
 
 import { FeedStore } from "./state.js";
-import { KafkaSource, MockSource, type Source } from "./sources.js";
+import { makeSource, type SourceKind } from "./sources.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-const PORT = Number(process.env.PORT ?? 8080);
+const PORT = Number(process.env.PORT ?? 8090);
 const HOST = process.env.HOST ?? "0.0.0.0";
-const SOURCE = (process.env.SOURCE ?? "kafka") as "kafka" | "mock";
-const BOOTSTRAP =
-  process.env.BOOTSTRAP_SERVERS ?? process.env.BOOTSTRAP ?? "localhost:9092";
-const COMMAND_TOPIC = process.env.COMMAND_TOPIC ?? "starship.engine.command";
-const TELEMETRY_TOPIC =
-  process.env.TELEMETRY_TOPIC ?? "starship.engine.telemetry";
+const SOURCE = (process.env.SOURCE ?? "mock") as SourceKind;
 const FLUSH_MS = Number(process.env.FLUSH_MS ?? 100);
-const TAIL = Number(process.env.TAIL ?? 400);
 
 async function main() {
   const app = Fastify({ logger: false });
-  const store = new FeedStore();
-  const sink = (ev: FeedEvent) => store.ingest(ev);
-
-  const source: Source =
-    SOURCE === "mock"
-      ? new MockSource(sink)
-      : new KafkaSource(
-          {
-            bootstrapServers: BOOTSTRAP,
-            commandTopic: COMMAND_TOPIC,
-            telemetryTopic: TELEMETRY_TOPIC,
-          },
-          sink,
-          (line) => console.log(`[viewer:kafka] ${line}`),
-        );
-
-  app.get("/api/health", async () => ({
-    ok: true,
-    source: source.name,
-    engine_count: Math.max(store.latestTelemetry.size, store.latestCommand.size),
-    counts: { ...store.counts },
-    ts_ms: Date.now(),
+  const store = new FeedStore(makeSource(SOURCE, {
+    broker: process.env.BOOTSTRAP_SERVERS ?? "localhost:9092",
   }));
 
-  app.get("/api/state", async () => ({
-    source: source.name,
-    snapshot: store.snapshot(),
-    tail: store.pending.slice(-TAIL),
-  }));
+  const timer = setInterval(() => store.flush(), FLUSH_MS);
+  timer.unref();
+
+  app.get("/api/health", async (req, reply) => {
+    void req;
+    const snap = store.snapshot();
+    return reply.send({
+      ok: true,
+      source: SOURCE,
+      ts_ms: snap.ts_ms,
+      engines: snap.counts.engines,
+      counts: snap.counts,
+      ship: {
+        run_id: snap.ship?.run_id ?? null,
+        meco: snap.ship?.meco ?? null,
+        tank_frac: snap.ship?.tank.frac ?? null,
+      },
+    });
+  });
+
+  app.get("/api/state", async (req, reply) => {
+    void req;
+    return reply.send(store.snapshot());
+  });
+
+  app.post<{ Body: ShipControlMessage }>("/api/control", async (req, reply) => {
+    if (!req.body || typeof (req.body as unknown as Record<string, unknown>).command !== "string") {
+      return reply.code(400).send({ ok: false, error: "body must be a ship.control command" });
+    }
+    try {
+      const ack = await store.sendControl(req.body);
+      return reply.send(ack);
+    } catch (err) {
+      return reply.code(502).send({
+        ok: false,
+        error: `control failed: ${(err as Error).message}`,
+      });
+    }
+  });
 
   app.get("/api/stream", (req, reply) => {
     reply.raw.writeHead(200, {
@@ -78,29 +84,18 @@ async function main() {
     reply.raw.write("retry: 3000\n\n");
     reply.hijack();
 
-    const send = (payload: unknown) => {
+    const send = (payload: string) => {
       if (!reply.raw.writableEnded && !reply.raw.destroyed) {
-        reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+        reply.raw.write(`data: ${payload}\n\n`);
       }
     };
 
-    // Prime reconnecting clients with the latest known state + recent tail.
-    send({
-      type: "hello",
-      source: source.name,
-      snapshot: store.snapshot(),
-      tail: store.pending.slice(-TAIL),
-    });
-
-    let lastEvent = performance.now();
-    const unsubscribe = store.subscribe((batch) => {
-      lastEvent = performance.now();
-      send({ type: "events", events: batch });
-    });
+    // Prime with current state, then stream flushes.
+    send(store.snapshotJSON());
+    const unsubscribe = store.subscribe({ send });
 
     const heartbeat = setInterval(() => {
-      if (performance.now() - lastEvent < 15_000) return;
-      send({ type: "heartbeat", ts_ms: Date.now() });
+      send(JSON.stringify({ heartbeat: true, ts_ms: Date.now() }));
     }, 10_000);
 
     const cleanup = () => {
@@ -127,31 +122,17 @@ async function main() {
     });
   }
 
-  store.start(FLUSH_MS);
-  void source.start().catch((err: Error) => {
-    console.error(`[viewer] source failed to start: ${err.message}`);
-  });
-  console.log(
-    `[viewer] source=${source.name} host=${HOST} port=${PORT} ` +
-      `bootstrap=${SOURCE === "kafka" ? BOOTSTRAP : "n/a (mock)"} ` +
-      `topics=[${COMMAND_TOPIC}, ${TELEMETRY_TOPIC}] flush=${FLUSH_MS}ms`,
-  );
+  void app.listen({ port: PORT, host: HOST });
+  console.log(`[viewer] source=${SOURCE} host=${HOST} port=${PORT} flush=${FLUSH_MS}ms`);
 
   const close = async () => {
+    clearInterval(timer);
+    store.flush();
     await app.close();
-    store.stop();
-    await source.stop();
     process.exit(0);
   };
   process.on("SIGINT", () => void close());
   process.on("SIGTERM", () => void close());
-
-  try {
-    await app.listen({ port: PORT, host: HOST });
-  } catch (err) {
-    console.error(`[viewer] failed to listen: ${(err as Error).message}`);
-    process.exit(1);
-  }
 }
 
-main();
+void main();

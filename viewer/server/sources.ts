@@ -1,250 +1,370 @@
-// Feed sources. Both implement the same on-emit interface so the server
-// doesn't care where data comes from:
-//   - MockSource  : in-process 33-engine fleet (develop the UX with no broker)
-//   - KafkaSource : real broker, consuming the command + telemetry topics
+/*
+ Pluggable ship/engine feed for the viewer. 
+  
+ - ``mock``: spawns the Python ship sim (simulator.shiploop, stdio transport) 
+   as a child process. Real physics, shared fuel, per-engine variability, and 
+   full run control -- no broker needed. 
+ - ``kafka``: consumes real engine.command / engine.telemetry / ship.status 
+   from the broker; controls are produced onto the ship control topic. 
+  
+ Both implement the same Source interface, so the SSE server and the client 
+ don't care which is wired in. 
+ " */
 
-import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import kafkajs from "kafkajs";
 
 import {
+  CommandMessage,
   ENGINE_COMMAND,
   ENGINE_TELEMETRY,
-  type CommandMessage,
-  type FeedEvent,
-  type TelemetryMessage,
-} from "../shared/types";
+  FeedEvent,
+  LineSummary,
+  SHIP_CONTROL,
+  SHIP_STATUS,
+  ShipAck,
+  ShipControlMessage,
+  TelemetryMessage,
+} from "../shared/types.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = process.env.REPO_ROOT ?? path.resolve(here, "..", "..");
+
+export type SourceKind = "mock" | "kafka";
 
 export interface Source {
-  readonly name: "mock" | "kafka";
-  start(): Promise<void>;
-  stop(): Promise<void>;
+  start(onEvent: (ev: FeedEvent) => void): void;
+  stop(): void;
+  isClosed(): boolean;
+  sendControl(msg: ShipControlMessage): Promise<unknown>;
+  restart(onEvent: (ev: FeedEvent) => void): void;
 }
 
-// --- mock -----------------------------------------------------------------
-
-// A deliberately simple stand-in for the Raptor fleet physics — enough to
-// exercise the full UX: spool-up lag, full-flow telemetry at 10 Hz, one
-// engine (sh-32) with a small load that starves and cuts, live command echo.
-const N = 33;
-const DT = 0.01;
-const TAU = 0.05;
-const P_LOAD = 3.0e7;
-const P_0 = 101325;
-const FULL_THRUST = 1.76e6;
-const G0 = 9.81;
-const ISP_FULL = 350;
-const FULL_MDOT = FULL_THRUST / (ISP_FULL * G0); // ~= 51 kg/s
-const MIXTURE = 3.6;
-
-interface MockEngine {
-  id: string;
-  load: number;
-  load0: number;
-  pc: number;
-  cut: boolean;
+function thrustMN(n: number): string {
+  return (n / 1e6).toFixed(3);
 }
 
-export class MockSource implements Source {
-  readonly name = "mock";
-  private timer: NodeJS.Timeout | null = null;
-  private engines: MockEngine[] = [];
-  private step = 0;
-  private jitter = 0;
+// ---------------- mock: the real ship sim, driven over a pipe ----------------
 
-  constructor(private readonly emit: (ev: FeedEvent) => void) {}
+export class ShipProcessSource implements Source {
+  private proc: ChildProcess | null = null;
+  private buf = "";
+  private onEvent: ((ev: FeedEvent) => void) | null = null;
+  private lastAck: ShipAck | null = null;
+  private ackWaiters: Array<{ command: string; resolve: (ack: ShipAck) => void }> = [];
+  private args: string[];
+  private dead = false;
 
-  async start(): Promise<void> {
-    this.engines = [];
-    for (let i = 1; i <= N; i++) {
-      const id = `sh-${String(i).padStart(2, "0")}`;
-      // sh-32 carries a small load: starves and cuts ~10 s in, like the demo.
-      const load = i === N ? 500 : 270_000; // kg
-      this.engines.push({ id, load, load0: load, pc: P_0, cut: false });
-    }
-    this.timer = setInterval(() => this.tick(), DT * 1000);
+  constructor(cfg: { vehicleId: string; speed?: number; emitEvery?: number }) {
+    const a = [
+      "--vehicle-id", cfg.vehicleId,
+      "--engines", "33",
+      "--dt", "0.01",
+      "--speed", String(cfg.speed ?? 1),
+      "--emit-every", String(cfg.emitEvery ?? 2),
+      "--log-every", "0", // silence the console status lines under the viewer
+    ];
+    this.args = a;
   }
 
-  async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-  }
-
-  private tick(): void {
-    this.step += 1;
-    const step = this.step;
-    const t = step * DT;
-    const ts = Date.now();
-    this.jitter = (Math.random() - 0.5) * 0.004;
-
-    for (const e of this.engines) {
-      // command out (vehicle side)
-      this.emit({
-        kind: "command",
-        engine_id: e.id,
-        recv_ms: ts,
-        msg: {
-          v: 1,
-          type: ENGINE_COMMAND,
-          vehicle_id: "starship",
-          engine_id: e.id,
-          seq: step,
-          t: Number((t - DT).toFixed(4)),
-          dt: DT,
-          throttle_demand_frac: 1.0,
-          ambient_pressure_pa: P_0,
-          ts_ms: ts,
-        } as CommandMessage,
-      });
-
-      // physics step (spool-up lag; starvation -> cut; decay after cut)
-      if (e.cut) {
-        e.pc *= Math.exp(-DT / TAU);
-      } else {
-        e.pc += (P_LOAD - e.pc) * (DT / TAU);
-        e.load -= FULL_MDOT * (e.pc / P_LOAD) * DT;
-        if (e.load <= 0.01 * e.load0) {
-          e.cut = true;
+  private spawnChild(onEvent: (ev: FeedEvent) => void): void {
+    this.dead = false;
+    this.buf = "";
+    // Prefer the project venv's python directly -- faster start, simple stdio.
+    // Fall back to `uv run` when the venv is missing.
+    const venvPy = path.join(REPO_ROOT, ".venv", "bin", "python");
+    const py = process.env.SHIP_PYTHON_BIN ?? (fs.existsSync(venvPy) ? venvPy : "uv");
+    const isUv = path.basename(py) === "uv";
+    const args = isUv
+      ? ["run", "python", "-m", "simulator.shiploop", ...this.args]
+      : ["-m", "simulator.shiploop", ...this.args];
+    const proc = spawn(py, args, { cwd: REPO_ROOT, stdio: ["pipe", "pipe", "pipe"] });
+    this.proc = proc;
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => {
+      this.buf += chunk;
+      let i: number;
+      while ((i = this.buf.indexOf("\n")) >= 0) {
+        const line = this.buf.slice(0, i).trim();
+        this.buf = this.buf.slice(i + 1);
+        if (!line) continue;
+        let doc: any;
+        try {
+          doc = JSON.parse(line);
+        } catch {
+          continue;
         }
+        if (doc?.type === "ship.ack") {
+          this.lastAck = doc as ShipAck;
+          const w = this.ackWaiters.shift();
+          if (w) w.resolve(doc as ShipAck);
+          continue;
+        }
+        const ev = mockToFeedEvent(doc);
+        if (ev) onEvent(ev);
       }
-      const thrust = (e.cut ? 0 : (e.pc / P_LOAD) * FULL_THRUST) * (1 + this.jitter);
-      const mdotTotal = thrust / (ISP_FULL * G0);
-      const mdotLox = mdotTotal * MIXTURE / (1 + MIXTURE);
-      const isp = thrust / (mdotTotal * G0);
-      const state = !e.cut && thrust > 1 ? "firing" : e.cut ? "cut" : "idle";
+    });
+    proc.stderr?.on("data", (d: Buffer) => {
+      try {
+        fs.appendFileSync(process.env.SHIP_LOG ?? "/tmp/ship-err.log", d);
+      } catch {
+        /* ignore */
+      }
+    });
+    proc.on("exit", () => {
+      this.dead = true;
+    });
+  }
 
-      // telemetry out (engine side)
-      this.emit({
-        kind: "telemetry",
-        engine_id: e.id,
-        recv_ms: ts,
-        msg: {
-          v: 1,
-          type: ENGINE_TELEMETRY,
-          vehicle_id: "starship",
-          engine_id: e.id,
-          seq: step,
-          t: Number(t.toFixed(4)),
-          ts_ms: ts,
-          state,
-          throttle_demand_frac: 1.0,
-          throttle_actual_frac: e.pc / P_LOAD,
-          chamber_pressure_pa: e.pc,
-          thrust_n: thrust,
-          isp_s: Number.isFinite(isp) ? isp : ISP_FULL,
-          mdot_kg_s: {
-            total: mdotTotal,
-            lox: mdotLox,
-            ch4: mdotTotal - mdotLox,
-          },
-          exhaust: {
-            velocity_m_s: isp * G0,
-            exit_pressure_pa: P_0,
-            exit_mach: (isp * G0) / 343,
-          },
-          propellant_remaining_kg: e.cut ? Math.max(e.load0 * 0.01, e.load) : e.load,
-          ambient_pressure_pa: P_0,
-          command_seq: step,
-        } as TelemetryMessage,
-      });
+  start(onEvent: (ev: FeedEvent) => void): void {
+    this.onEvent = onEvent;
+    this.spawnChild(onEvent);
+  }
+
+  stop(): void {
+    if (this.proc?.pid != null) {
+      try {
+        this.proc.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
     }
+  }
+
+  isClosed(): boolean {
+    return (this.proc?.exitCode != null) || this.dead;
+  }
+
+  async sendControl(msg: ShipControlMessage): Promise<unknown> {
+    if (this.proc == null || this.proc.exitCode != null) {
+      // (re)start the ship if it isn't alive, then send
+      if (this.onEvent) this.spawnChild(this.onEvent);
+      else throw new Error("ship process not started");
+    }
+    return new Promise((resolve) => {
+      const waiter = { command: msg.command, resolve };
+      this.ackWaiters.push(waiter);
+      this.proc!.stdin!.write(JSON.stringify(msg) + "\n");
+      setTimeout(() => {
+        const i = this.ackWaiters.indexOf(waiter);
+        if (i >= 0) {
+          this.ackWaiters.splice(i, 1);
+          // A stale ack from an earlier command must never be reported as a
+          // success for this one.
+          resolve({ type: "ship.ack", ok: false, command: msg.command, error: "no ack from ship (stdin pipe may be broken)" });
+        }
+      }, 4000);
+    });
+  }
+
+  restart(onEvent: (ev: FeedEvent) => void): void {
+    this.stop();
+    this.start(onEvent);
   }
 }
 
-// --- kafka ------------------------------------------------------------------
-
-const JSON_KEY = "utf8";
-
-export interface KafkaSourceOpts {
-  bootstrapServers: string;
-  commandTopic: string;
-  telemetryTopic: string;
+function mockToFeedEvent(doc: any): FeedEvent | null {
+  if (doc?.type === ENGINE_COMMAND && typeof doc.throttle_demand_frac === "number") {
+    const msg = doc as CommandMessage;
+    const line: LineSummary = {
+      kind: "command",
+      t: msg.t,
+      summary: `cmd ${msg.engine_id} #${msg.seq} thr ${msg.throttle_demand_frac}`,
+      engine_id: msg.engine_id,
+      seq: msg.seq,
+    };
+    return { kind: "command", message: msg, lineSummary: line };
+  }
+  if (doc?.type === ENGINE_TELEMETRY && typeof doc.thrust_n === "number") {
+    const msg = doc as TelemetryMessage;
+    const mdot = msg.mdot_kg_s ?? { total: 0, lox: 0, ch4: 0 };
+    const line: LineSummary = {
+      kind: "telemetry",
+      t: msg.t,
+      summary: `${msg.engine_id} #${msg.seq} ${msg.state} ${thrustMN(msg.thrust_n)}MN mdot ${mdot.total.toFixed(1)}kg/s`,
+      engine_id: msg.engine_id,
+      seq: msg.seq,
+    };
+    return { kind: "telemetry", message: msg, lineSummary: line };
+  }
+  if (doc?.type === SHIP_STATUS && doc.tank) {
+    const msg = doc;
+    const line: LineSummary = {
+      kind: "ship",
+      t: msg.t,
+      summary: `ship #${msg.seq} ${msg.meco ? "MECO" : `${thrustMN(msg.thrust_n)}MN`} tank ${(msg.tank.frac * 100).toFixed(1)}%`,
+      engine_id: msg.vehicle_id,
+      seq: msg.seq,
+    };
+    return { kind: "ship", message: msg, lineSummary: line };
+  }
+  return null;
 }
+
+// ---------------- kafka: the real broker-fed path ----------------
 
 export class KafkaSource implements Source {
-  readonly name = "kafka";
-  private client: { disconnect?: () => Promise<void> } | null = null;
-  private consumers: Array<{
-    disconnect?: () => Promise<void>;
-  }> = [];
+  private client: any = null;
+  private consumer: any = null;
+  private producer: any = null;
+  private running = false;
+  private closed = false;
 
   constructor(
-    private readonly opts: KafkaSourceOpts,
-    private readonly emit: (ev: FeedEvent) => void,
-    private readonly log: (line: string) => void = () => {},
-  ) {}
-
-  async start(): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const kafkaModule: any = await import("kafkajs").then((m) => m.default ?? m);
-    const kafka = new kafkaModule.Kafka({
-      clientId: `sim-viewer-${randomUUID().slice(0, 8)}`,
-      brokers: [this.opts.bootstrapServers],
-      retry: { initialBackoff: 200, maxBackoff: 2000, retries: 12 },
+    opts: { broker: string; vehicleTopic: string; commandTopic: string; controlTopic: string; vehicleId: string },
+  ) {
+    const K = kafkajs.Kafka;
+    this.client = new K({
+      brokers: [opts.broker],
+      "clientId": "ts-viewer",
+      retry: {
+        initialRetryTime: 200,
+        maxRetryTime: 2000,
+        retries: 8,
+        factor: 2,
+      },
     });
-    this.client = kafka;
-
-    const specs: [string, "command" | "telemetry"][] = [
-      [this.opts.commandTopic, "command"],
-      [this.opts.telemetryTopic, "telemetry"],
-    ];
-    for (const [topic, kind] of specs) {
-      const consumer = kafka.consumer({
-        groupId: `sim-viewer-${kind}`,
-        "auto.offset.reset": "earliest",
-        allowAutoTopicCreation: true,
-      });
-      this.consumers.push(consumer);
-      consumer.on(consumer.events.CRASH, (e: { message: string }) =>
-        this.log(`consumer(${topic}) crash: ${e.message}`),
-      );
-      // kafkajs requires an explicit subscription before `run()` — without it
-      // the consumer joins the group with an empty topic list (topics:[]) and
-      // is assigned no partitions, so it never fetches anything.
-      await consumer.subscribe({ topic, fromBeginning: true });
-      await consumer
-        .run({
-          autoCommit: true,
-          // kafkajs >= 1.5/2.x delivers the batch nested: { batch, resolveOffset, ... }
-          eachBatch: async (payload: {
-            batch: { messages: { value: Buffer | null }[] };
-          }) => {
-            for (const msg of payload.batch.messages) {
-              if (!msg.value) continue;
-              const event = toFeedEvent(kind, msg.value);
-              if (event) this.emit(event);
-            }
-          },
-        })
-        .catch((err: Error) => this.log(`consumer(${topic}) run: ${err.message}`));
-    }
-    this.log(
-      `kafka source up (broker=${this.opts.bootstrapServers}, ` +
-        `command=${this.opts.commandTopic}, telemetry=${this.opts.telemetryTopic})`,
-    );
+    this.consumer = this.client.consumer({
+      groupId: `viewer-${opts.vehicleId}`,
+      "autoCommit": true,
+    });
+    this.vehicleTopic = opts.vehicleTopic;
+    this.commandTopic = opts.commandTopic;
+    this.controlTopic = opts.controlTopic;
+    this.vehicleId = opts.vehicleId;
   }
 
-  async stop(): Promise<void> {
-    for (const c of this.consumers) await c.disconnect?.().catch(() => {});
-    await this.client?.disconnect?.().catch(() => {});
+  private vehicleTopic: string;
+  private commandTopic: string;
+  private controlTopic: string;
+  private vehicleId: string;
+
+  start(onEvent: (ev: FeedEvent) => void): void {
+    if (this.running) return;
+    this.running = true;
+    this.closed = false;
+    void (async () => {
+      try {
+        await this.consumer.connect();
+        await this.consumer.subscribe({ topic: this.vehicleTopic, fromBeginning: true });
+        await this.consumer.subscribe({ topic: this.commandTopic, fromBeginning: true });
+        await this.consumer.run({
+          "eachBatch": async (payload: any) => {
+            const batch = payload.batch ?? payload;
+            for (const r of batch.messages) {
+              const ev = toFeedEvent(r);
+              if (ev) onEvent(ev);
+            }
+          },
+        });
+      } catch (err) {
+        this.running = false;
+        this.closed = true;
+        console.error("kafka source start failed:", (err as Error).message);
+      }
+    })();
+  }
+
+  stop(): void {
+    this.running = false;
+    void (async () => {
+      try { await this.consumer?.close(); } catch { /* ignore */ }
+      try { await this.producer?.disconnect(); } catch { /* ignore */ }
+    })();
+  }
+
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  async sendControl(msg: ShipControlMessage): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      void (async () => {
+        try {
+          if (!this.producer) this.producer = this.client.producer();
+          await this.producer.connect();
+          await this.producer.send({
+            topic: this.controlTopic,
+            messages: [{ key: msg.vehicle_id, value: JSON.stringify(msg) }],
+          });
+          resolve({ type: "ship.ack", ok: true, note: "queued to control topic" });
+        } catch (e) {
+          reject(e as Error);
+        }
+      })();
+    });
+  }
+
+  restart(onEvent: (ev: FeedEvent) => void): void {
+    this.stop();
+    this.start(onEvent);
   }
 }
 
-function toFeedEvent(
-  kind: "command" | "telemetry",
-  raw: Buffer,
-): FeedEvent | null {
-  let json: any;
-  try {
-    json = JSON.parse(raw.toString(JSON_KEY));
-  } catch {
-    return null;
+function toFeedEvent(raw: any): FeedEvent | null {
+  const doc = raw?.value
+    ? ((): any => { try { return JSON.parse(raw.value.toString("utf8")); } catch { return null; } })()
+    : raw;
+  if (!doc || typeof doc !== "object") return null;
+
+  if (doc.type === ENGINE_COMMAND) {
+    const msg = doc as CommandMessage;
+    const line: LineSummary = {
+      kind: "command",
+      t: msg.t,
+      summary: `cmd ${msg.engine_id} #${msg.seq} thr ${msg.throttle_demand_frac}`,
+      engine_id: msg.engine_id,
+      seq: msg.seq,
+    };
+    return { kind: "command", message: msg, lineSummary: line };
   }
-  if (json.v !== 1 || typeof json.engine_id !== "string") return null;
-  const want = kind === "command" ? ENGINE_COMMAND : ENGINE_TELEMETRY;
-  if (json.type !== want) return null;
-  return {
-    kind,
-    engine_id: json.engine_id,
-    msg: json,
-    recv_ms: Date.now(),
-  };
+  if (doc.type === ENGINE_TELEMETRY) {
+    const msg = doc as TelemetryMessage;
+    const mdot = msg.mdot_kg_s ?? { total: 0, lox: 0, ch4: 0 };
+    const line: LineSummary = {
+      kind: "telemetry",
+      t: msg.t,
+      summary: `${msg.engine_id} #${msg.seq} ${msg.state} ${thrustMN(msg.thrust_n)}MN mdot ${mdot.total.toFixed(1)}kg/s`,
+      engine_id: msg.engine_id,
+      seq: msg.seq,
+    };
+    return { kind: "telemetry", message: msg, lineSummary: line };
+  }
+  if (doc.type === SHIP_STATUS) {
+    const msg = doc;
+    const line: LineSummary = {
+      kind: "ship",
+      t: msg.t,
+      summary: `ship #${msg.seq} ${msg.meco ? "MECO" : `${thrustMN(msg.thrust_n)}MN`} tank ${(msg.tank.frac * 100).toFixed(1)}%`,
+      engine_id: msg.vehicle_id,
+      seq: msg.seq,
+    };
+    return { kind: "ship", message: msg, lineSummary: line };
+  }
+  return null;
+}
+
+// ---------------- factory ----------------
+
+export function makeSource(kind: SourceKind, opts: Record<string, string | undefined>): Source {
+  if (kind === "kafka") {
+    const broker = opts.broker ?? process.env.BOOTSTRAP_SERVERS ?? "localhost:9092";
+    const vehicleId = process.env.VEHICLE_ID ?? "starship";
+    return new KafkaSource({
+      broker,
+      vehicleTopic: opts.vehicleTopic ?? "starship.engine.telemetry",
+      commandTopic: opts.commandTopic ?? "starship.engine.command",
+      controlTopic: opts.controlTopic ?? "starship.ship.control",
+      vehicleId,
+    });
+  }
+  return new ShipProcessSource({
+    vehicleId: process.env.VEHICLE_ID ?? "starship",
+    speed: process.env.SHIP_SPEED ? Number(process.env.SHIP_SPEED) : undefined,
+    emitEvery: process.env.SHIP_EMIT_EVERY ? Number(process.env.SHIP_EMIT_EVERY) : undefined,
+  });
 }
