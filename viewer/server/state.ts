@@ -32,12 +32,48 @@ export class FeedStore {
   counts = { command: 0, telemetry: 0, ship: 0 };
 
   private clients = new Set<Subscriber>();
+  private runKey: string | null = null;
 
   constructor(private source: Source) {
     this.source.start((ev) => this.ingest(ev));
   }
 
+  private stackMode = false;
+
+  /**
+   New mission? Wipe every previous-run doc before the new ones land.
+
+   Canonical run key = the FIRST stage's run id (stack feeds: from the
+   stack.status; ship feeds: the ship.status). The Starship upper-stage
+   ship doc carries its own (different) run id, so it never keys -- the
+   two stages are re-armed together and the first stage's id changes in
+   lockstep with the mission.
+   */
+  private noteRun(ev: FeedEvent): void {
+    let key: string | null = null;
+    if (ev.kind === "stack") {
+      this.stackMode = true;
+      key = ev.message.sh.run_id;
+    } else if (ev.kind === "ship" && !this.stackMode) {
+      key = ev.message.run_id;
+    }
+    if (key !== null && key !== this.runKey) {
+      if (this.runKey !== null) {
+        // previous run's engines / ship docs / per-vehicle failures are stale
+        this.latestTel.clear();
+        this.latestCmd.clear();
+        this.ships.clear();
+        this.ship = null;
+        this.stack = null;
+        this.summaries.length = 0;
+        this.counts = { command: 0, telemetry: 0, ship: 0 };
+      }
+      this.runKey = key;
+    }
+  }
+
   ingest(ev: FeedEvent): void {
+    this.noteRun(ev);
     if (ev.kind === "ship") {
       this.ship = ev.message;
       this.ships.set(ev.message.vehicle_id, ev.message);

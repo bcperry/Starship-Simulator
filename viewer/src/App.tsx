@@ -92,15 +92,18 @@ export default function App() {
           )}
 
           {snapshot.stack &&
-            Object.values(snapshot.ships).map((view) => {
-              const vid = view.ship?.vehicle_id ?? "stage";
+            [snapshot.stack.sh.vehicle_id, snapshot.stack.ss.vehicle_id].map((vid) => {
               const label = vid === "starship" ? "Starship — upper stage" : vid === "super-heavy" ? "Super Heavy — first stage" : vid;
+              const hint = vid === "starship" ? "own tank · 6× Raptor (3 VAC + 3 SL)" : "own tank · 33× Raptor";
+              const view =
+                snapshot.ships[vid] ??
+                (snapshot.stack ? { ship: null, history: [], lastAck: null } : null);
               return (
-                <Panel key={vid} title={label} hint="own tank · 6× Raptor (3 VAC + 3 SL)"
-                  right={<span className={`${view.ship?.meco ? "dim" : "livepill"}`}>
-                    {view.ship ? (view.ship.meco ? "MECO" : "burning") : "standby"}
+                <Panel key={vid} title={label} hint={hint}
+                  right={<span className={`${view?.ship?.meco ? "dim" : "livepill"}`}>
+                    {view?.ship ? (view.ship.meco ? "MECO" : "burning") : "standby"}
                   </span>}>
-                  <ShipPanel ship={view} />
+                  <ShipPanel ship={view!} />
                 </Panel>
               );
             })}
