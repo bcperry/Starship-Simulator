@@ -9,6 +9,8 @@ import { EngineGrid } from "./components/EngineGrid";
 import { FlameIcon, PauseIcon, PlayIcon, RocketIcon } from "./components/Icons";
 import { FleetBoard } from "./components/FleetBoard";
 import { FlightPanel } from "./components/FlightPanel";
+import { EngineDiagram } from "./components/EngineDiagram";
+import { WorldMap } from "./components/WorldMap";
 import { MessageFeed } from "./components/MessageFeed";
 import { Panel } from "./components/Panel";
 import { PhaseBar } from "./components/PhaseBar";
@@ -82,6 +84,13 @@ export default function App() {
       <div className="grid">
         <div className="col">
           {snapshot.flight && <FlightPanel flight={snapshot.flight} />}
+
+          {snapshot.flight && (
+            <div className="missionrow">
+              <WorldMap flight={snapshot.flight} trail={snapshot.trail ?? []} />
+              <EngineDiagram engines={engines} />
+            </div>
+          )}
 
           <Panel title="Run control" hint={snapshot.stack ? "new run · throttle · cut active stage — drives the stack" : "new run · throttle · MECO — drives the ship sim"}>
             <ControlPanel ship={snapshot.ship} vehicleId={`starship`} stackMode={!!snapshot.stack} />

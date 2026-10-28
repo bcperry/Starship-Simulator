@@ -11,6 +11,7 @@ import {
   ShipStatusMessage,
   StackStatusMessage,
   TelemetryMessage,
+  TrailPoint,
 } from "../shared/types.js";
 import type { Source } from "./sources.js";
 
@@ -30,6 +31,7 @@ export class FeedStore {
   ships = new Map<string, ShipStatusMessage>(); // per-vehicle (stack mode)
   stack: StackStatusMessage | null = null;
   flight: FlightStateMessage | null = null; // newest flight.state (mission mode)
+  trail: TrailPoint[] = []; // mission ground track (sim-time sampled); resets per run
   summaries: LineSummary[] = [];
   counts = { command: 0, telemetry: 0, ship: 0 };
 
@@ -68,6 +70,7 @@ export class FeedStore {
         this.ship = null;
         this.stack = null;
         this.flight = null;
+        this.trail = [];
         this.summaries.length = 0;
         this.counts = { command: 0, telemetry: 0, ship: 0 };
       }
@@ -85,6 +88,7 @@ export class FeedStore {
       this.stack = ev.message;
     } else if (ev.kind === "flight") {
       this.flight = ev.message;
+      this._pushTrail(ev.message);
     } else if (ev.kind === "command") {
       this.latestCmd.set(ev.message.engine_id, {
         lineSummary: ev.lineSummary,
@@ -106,6 +110,18 @@ export class FeedStore {
     return new Set([...this.latestTel.keys(), ...this.latestCmd.keys()]).size;
   }
 
+  /// Sample the ground track as the vehicle moves: ~2 points/s of sim-time, so
+  /// a full ~400 s mission is a few hundred points (keeps the JSON light).
+  private _pushTrail(f: FlightStateMessage): void {
+    const pos = f.position;
+    if (!pos || typeof pos.lat_deg !== "number" || typeof pos.lon_deg !== "number") return;
+    const t = f.t;
+    const last = this.trail[this.trail.length - 1];
+    if (last && t - last.t < 0.5) return;
+    this.trail.push({ t, lat: pos.lat_deg, lon: pos.lon_deg });
+    if (this.trail.length > 2000) this.trail.splice(0, this.trail.length - 2000);
+  }
+
   snapshot() {
     const ids = new Set([...this.latestTel.keys(), ...this.latestCmd.keys()]);
     const latest: Record<string, { telemetry?: Held; command?: Held }> = {};
@@ -121,6 +137,7 @@ export class FeedStore {
       ships: Object.fromEntries(this.ships),
       stack: this.stack,
       flight: this.flight,
+      trail: this.trail,
       lines: this.summaries.slice(-40),
       counts: { ...this.counts, engines: this.engineCount() },
       ts_ms: Date.now(),

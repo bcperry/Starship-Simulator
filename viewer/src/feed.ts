@@ -13,6 +13,7 @@ import type {
   ShipStatusMessage,
   StackStatusMessage,
   TelemetryMessage,
+  TrailPoint,
 } from "@shared/types";
 
 const HISTORY_CAP = 480;
@@ -76,6 +77,7 @@ export interface Snapshot {
   ships: Record<string, ShipView>; // per-vehicle (single-ship feeds: one key)
   stack: StackStatusMessage | null; // full-stack phase state (stack feeds only)
   flight: FlightStateMessage | null; // Phase-9 orbital mission state (flight feeds)
+  trail: TrailPoint[]; // mission ground track (sim-time sampled)
   source: string | null;
   connected: boolean;
   lastEventMs: number;
@@ -93,6 +95,7 @@ interface ServerSnapshot {
   ships?: Record<string, ShipStatusMessage>;
   stack?: StackStatusMessage | null;
   flight?: FlightStateMessage | null;
+  trail?: TrailPoint[];
   lines: LineSummary[];
   counts: { command: number; telemetry: number; ship: number; engines: number };
   ts_ms: number;
@@ -110,6 +113,7 @@ class ClientFeed {
   private shipViews = new Map<string, ShipView>();
   private stack: StackStatusMessage | null = null;
   private flight: FlightStateMessage | null = null;
+  private trail: TrailPoint[] = [];
   private runId: string | null = null;
   private counts = { command: 0, telemetry: 0, ship: 0, engines: 0 };
   private source: string | null = null;
@@ -129,6 +133,7 @@ class ClientFeed {
     ships: {},
     stack: null,
     flight: null,
+    trail: [],
     source: null,
     connected: false,
     lastEventMs: 0,
@@ -311,6 +316,7 @@ class ClientFeed {
     }
     if (snap.stack) this.stack = snap.stack;
     if (snap.flight) this.flight = snap.flight;
+    this.trail = snap.trail ?? [];
     // active vessel view drives the single-ship panels & trend
     const activeId = this.stack?.active_vehicle ?? Object.keys(ships)[0];
     if (activeId && this.shipViews.has(activeId)) {
@@ -394,6 +400,7 @@ class ClientFeed {
       ships: Object.fromEntries(this.shipViews),
       stack: this.stack,
       flight: this.flight,
+      trail: this.trail,
       source: this.source,
       connected: this.connected,
       lastEventMs: this.lastEventMs,

@@ -6,6 +6,13 @@ export const SHIP_STATUS = "ship.status"; // ship loop -> viewers: shared fuel +
 export const SHIP_CONTROL = "ship.control"; // operator -> ship loop: start_run / throttle / meco
 export const FLIGHT_STATE = "flight.state"; // mission loop -> viewers: 6-DOF state + orbit elements
 
+/// A sampled point on the mission's ground track (sim time, geodetic deg).
+export interface TrailPoint {
+  t: number;
+  lat: number;
+  lon: number;
+}
+
 export interface MDot {
   total: number;
   lox: number;
