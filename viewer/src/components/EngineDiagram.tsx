@@ -29,11 +29,13 @@ export interface Cell {
   kind: "vac" | "sl" | "core";
 }
 
-// SH: uniform size, ~0.13 engine radius (measured from the reference image).
+// SH: uniform size, ~0.13 engine radius (measured from the reference image) — PERFECT, don't touch.
 const SH: Foot = { core: 0.115, ring: 0.140, glow: 0.150 };
-// VAC (Starship vacuum) is the LARGEST; SL (sea‑level) the smallest.
-const VAC: Foot = { core: 0.170, ring: 0.200, glow: 0.220 };
-const SL: Foot = { core: 0.100, ring: 0.130, glow: 0.150 };
+// Starship (measured from the reference, normalized to cluster outer radius = 1.0):
+// 3 large Vacuum engines outboard  (ring 0.669, engine R 0.331)
+// 3 small Sea‑Level engines inboard (ring 0.195, engine R 0.111)  → Vac:SL ≈ 3 : 1
+const VAC: Foot = { core: 0.290, ring: 0.331, glow: 0.365 };
+const SL: Foot = { core: 0.095, ring: 0.111, glow: 0.135 };
 
 function stateOf(e: EngineView | undefined): EState {
   const s = e?.telemetry?.state;
@@ -72,10 +74,10 @@ export function ssWeb(layout: EngineView[]): Cell[] {
     const [x, y] = spot(r, deg);
     out.push({ x, y, core: foot.core, ring: foot.ring, glow: foot.glow, kind });
   };
-  // three LARGEST Vacuum engines, outboard (12 / 4 / 8 o'clock)
-  for (const a of [90, 210, 330]) push(0.82, a, VAC, "vac");
-  // three smaller Sea‑Level engines, inboard & interleaved (2 / 6 / 10 o'clock)
-  for (const a of [30, 150, 270]) push(0.38, a, SL, "sl");
+  // three LARGEST Vacuum engines, outboard (12 / 4 / 8 o'clock), one at top
+  for (const a of [90, 210, 330]) push(0.669, a, VAC, "vac");
+  // three small Sea‑Level engines clustered in a tight inner triangle (2 / 6 / 10 o'clock)
+  for (const a of [30, 150, 270]) push(0.195, a, SL, "sl");
   // map engines (ss-01..06): Vacs=ss-01..03 (outboard), SLs=ss-04..06 (inboard)
   return out.map((c, i) => {
     const e = layout[i];
