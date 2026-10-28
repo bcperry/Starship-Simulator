@@ -35,11 +35,10 @@ Run it:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .orbit import FlightModel, MU, PitchProgram, Site, orbit_elements, select_heading
+from .orbit import FlightModel, PitchProgram, Site, orbit_elements, select_heading
 from .ship import Ship, ShipConfig
 from .stack import PHASE_DONE, PHASE_LIFTOFF, PHASE_UPPER, Stack, StackConfig
 from .starship import Starship
@@ -310,14 +309,16 @@ class StackFlight:
         · Super Heavy: MECO by fuel fraction — the booster banks
           ``sh_meco_resid_frac`` of its propellant for boostback + landing
           instead of burning to empty.
-        · Starship: SECO the moment the coast state is a bound orbit whose
-          perigee clears the LEO floor (orbit insertion), banking the
-          residual propellant for boostback instead of burning the tank dry.
+        · Starship: a single continuous gravity-turn burn, with SECO the
+          instant the coast perigee clears the LEO floor.  Perigee is the
+          lowest point of the orbit, so it is a state (not a flaky instant);
+          cutting the burn here — rather than on a local altitude/velocity
+          match, which fires too early and leaves the perigee at the surface
+          — both establishes LEO and banks the residual for boostback.
         Returns any ack docs the underlying ships emitted.
         """
         out: list[dict] = []
         sh_cut = {"type": "ship.control", "v": 1, "command": "meco"}
-        ss_cut = {"type": "ship.control", "v": 1, "command": "meco"}
         if self.stack.phase == PHASE_LIFTOFF and not self.sh.meco:
             sh_now = self.sh.tank_ox_kg + self.sh.tank_ch4_kg
             sh_init = self.cfg.sh_lox_kg + self.cfg.sh_ch4_kg
@@ -325,37 +326,20 @@ class StackFlight:
                 out.append(self.sh.apply_control(dict(sh_cut)))
                 self.sh_meco_t = self.sh.meco_t
         elif self.stack.phase == PHASE_UPPER and not self.ss.meco:
-            if self._leo_established() or self._near_circular(
-                self.cfg.leo_target_alt_m
-            ):
-                out.append(self.ss.apply_control(dict(ss_cut)))
+            if self._leo_established():
+                out.append(self.ss.apply_control(
+                    {"type": "ship.control", "v": 1, "command": "meco"}))
                 self.ss_seco_t = self.ss.meco_t
         return out
 
-    def _near_circular(self, target_alt_m: float) -> bool:
-        """True when the coast state is a near-circular orbit around
-        ``target_alt_m`` — the right moment to cut the upper stage."""
-        r = self.model.r0
-        rmag = math.sqrt(r[0] ** 2 + r[1] ** 2 + r[2] ** 2)
-        v = self.model.v
-        vmag = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
-        v_circ = math.sqrt(MU / rmag)
-        vr = (v[0] * r[0] + v[1] * r[1] + v[2] * r[2]) / rmag
-        alt = self.model.altitude()
-        return (
-            100_000.0 <= alt <= target_alt_m + 130_000.0
-            and 0.985 <= vmag / v_circ <= 1.018
-            and abs(vr) < 60.0
-        )
-
     def _leo_established(self) -> bool:
         """True the instant the coast state is a bound orbit whose perigee is
-        at or above the LEO floor -- the vehicle has inserted into LEO and
-        will not re-enter.  Firing SECO here (rather than waiting for a dry
-        tank) is what banks the Starship's residual propellant for
-        boostback.  Because perigee is the *lowest* point of the orbit
-        ellipse, it is a state (not an instant) and is not flaky, and it
-        only becomes true once the vehicle is at or above the floor."""
+        at or above the LEO floor — the vehicle has inserted into LEO and
+        will not re-enter.  Firing SECO here (rather than on a local
+        altitude/velocity match, which fires too early and leaves the
+        perigee at the surface) both establishes the orbit and banks the
+        residual propellant for boostback.  Perigee is the *lowest* point of
+        the orbit ellipse, so it is a state, not a flaky instant."""
         orb = orbit_elements(self.model.r0, self.model.v)
         return orb is not None and orb["perigee_km"] >= self.cfg.leo_perigee_floor_km
 
