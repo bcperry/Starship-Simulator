@@ -2,9 +2,12 @@
 // server snapshot into (a) per-engine latest + history, (b) a ship fuel/trend
 // series, (c) a message log. Coalesced to ~10 Hz so React renders cheaply.
 
-import { fleetSummary, type FleetSummary } from "./lib/aggregate";
+import {
+  fleetSummary, type FleetSummary,
+} from "./lib/aggregate";
 import type {
   CommandMessage,
+  FlightStateMessage,
   LineSummary,
   ShipAck,
   ShipStatusMessage,
@@ -39,7 +42,7 @@ export interface FleetPoint extends FleetSummary {
   t: number;
 }
 
-export type FeedLineKind = "command" | "telemetry" | "ship" | "stack";
+export type FeedLineKind = "command" | "telemetry" | "ship" | "stack" | "flight";
 
 export interface FeedLine {
   id: string;
@@ -72,6 +75,7 @@ export interface Snapshot {
   ship: ShipView; // the ACTIVE vessel (stack mode: follows the burning stage)
   ships: Record<string, ShipView>; // per-vehicle (single-ship feeds: one key)
   stack: StackStatusMessage | null; // full-stack phase state (stack feeds only)
+  flight: FlightStateMessage | null; // Phase-9 orbital mission state (flight feeds)
   source: string | null;
   connected: boolean;
   lastEventMs: number;
@@ -88,6 +92,7 @@ interface ServerSnapshot {
   ship: ShipStatusMessage | null;
   ships?: Record<string, ShipStatusMessage>;
   stack?: StackStatusMessage | null;
+  flight?: FlightStateMessage | null;
   lines: LineSummary[];
   counts: { command: number; telemetry: number; ship: number; engines: number };
   ts_ms: number;
@@ -104,6 +109,7 @@ class ClientFeed {
   private ship: ShipView = { ship: null, history: [], lastAck: null };
   private shipViews = new Map<string, ShipView>();
   private stack: StackStatusMessage | null = null;
+  private flight: FlightStateMessage | null = null;
   private runId: string | null = null;
   private counts = { command: 0, telemetry: 0, ship: 0, engines: 0 };
   private source: string | null = null;
@@ -122,6 +128,7 @@ class ClientFeed {
     ship: { ship: null, history: [], lastAck: null },
     ships: {},
     stack: null,
+    flight: null,
     source: null,
     connected: false,
     lastEventMs: 0,
@@ -238,6 +245,7 @@ class ClientFeed {
         this.lastShipSeq = 0;
         this.ship = { ship: snap.ship, history: [], lastAck: null };
         this.stack = snap.stack ?? null;
+        this.flight = snap.flight ?? null;
         this.counts = { ...snap.counts };
       }
       this.runId = rid;
@@ -302,6 +310,7 @@ class ClientFeed {
       this.shipViews.set(vid, { ...view, ship: s });
     }
     if (snap.stack) this.stack = snap.stack;
+    if (snap.flight) this.flight = snap.flight;
     // active vessel view drives the single-ship panels & trend
     const activeId = this.stack?.active_vehicle ?? Object.keys(ships)[0];
     if (activeId && this.shipViews.has(activeId)) {
@@ -338,8 +347,16 @@ class ClientFeed {
         keep
       );
     }
+    if (this.flight) {
+      const fl = this.flight;
+      const altKm = ((fl.position?.alt_m ?? 0) / 1000).toFixed(1);
+      const orb = fl.orbit
+        ? `peri ${fl.orbit.perigee_km.toFixed(0)}km`
+        : (fl.crashed ? "re-entry" : "ascent");
+      this.upsertLine("flight", "flight", `flight ${fl.phase} alt ${altKm}km · ${orb}`, Date.now(), keep);
+    }
     for (const k of [...this.lineMap.keys()]) if (!keep.has(k)) this.lineMap.delete(k);
-    const rank: Record<string, number> = { command: 0, telemetry: 1, ship: 2, stack: 3 };
+    const rank: Record<string, number> = { command: 0, telemetry: 1, ship: 2, stack: 3, flight: 4 };
     this.lines = [...this.lineMap.values()]
       .sort((a, b) => (rank[a.kind] ?? 9) - (rank[b.kind] ?? 9) || (a.engine_id < b.engine_id ? -1 : 1))
       .slice(0, LINE_CAP);
@@ -376,6 +393,7 @@ class ClientFeed {
       ship: this.ship,
       ships: Object.fromEntries(this.shipViews),
       stack: this.stack,
+      flight: this.flight,
       source: this.source,
       connected: this.connected,
       lastEventMs: this.lastEventMs,

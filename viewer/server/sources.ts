@@ -22,6 +22,8 @@ import {
   CommandMessage,
   ENGINE_COMMAND,
   ENGINE_TELEMETRY,
+  FLIGHT_STATE,
+  FlightStateMessage,
   FeedEvent,
   LineSummary,
   SHIP_CONTROL,
@@ -34,7 +36,7 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = process.env.REPO_ROOT ?? path.resolve(here, "..", "..");
 
-export type SourceKind = "mock" | "kafka" | "stack";
+export type SourceKind = "mock" | "kafka" | "stack" | "flight";
 
 export interface Source {
   start(onEvent: (ev: FeedEvent) => void): void;
@@ -60,7 +62,23 @@ export class ShipProcessSource implements Source {
   private module = "simulator.shiploop";
   private dead = false;
 
-  constructor(cfg: { vehicleId: string; speed?: number; emitEvery?: number; stack?: boolean }) {
+  constructor(cfg: { vehicleId: string; speed?: number; emitEvery?: number; stack?: boolean; flight?: boolean }) {
+    if (cfg.flight) {
+      // Phase-9 orbital mission: Super Heavy + Starship driving a real ECI
+      // trajectory, emitting flight.state (position / orbit elements / staging)
+      // alongside the per-engine + ship + stack documents.
+      this.args = [
+        "--seed", process.env.SHIP_SEED ?? "7",
+        "--dt", "0.01",
+        "--speed", String(cfg.speed ?? 1),
+        "--emit-every", String(cfg.emitEvery ?? 2),
+        "--log-every", "0", // silence the console status lines under the viewer
+        "--sh-failures", process.env.SHIP_SH_FAILURES ?? "0",
+        "--ss-failures", process.env.SHIP_SS_FAILURES ?? "0",
+      ];
+      this.module = "simulator.flightloop";
+      return;
+    }
     const a = cfg.stack
       ? [
           // full stack: Super Heavy (33) + Starship (3x VAC + 3x SL)
@@ -234,6 +252,23 @@ function mockToFeedEvent(doc: any): FeedEvent | null {
     };
     return { kind: "stack", message: msg, lineSummary: line };
   }
+  if (doc?.type === FLIGHT_STATE) {
+    const msg = doc as FlightStateMessage;
+    const altKm = (msg.position?.alt_m ?? 0) / 1000;
+    const orb = msg.orbit;
+    const orbitTxt = orb
+      ? `peri ${orb.perigee_km.toFixed(0)}km · apo ${orb.apogee_km.toFixed(0)}km`
+      : (msg.crashed ? "re-entry" : "ascent");
+    const line: LineSummary = {
+      kind: "flight",
+      t: msg.t,
+      summary: `flight ${msg.phase} alt ${altKm.toFixed(1)}km · ${orbitTxt}`,
+      engine_id: "flight",
+      seq: 0,
+      ts_ms: Date.now(),
+    };
+    return { kind: "flight", message: msg, lineSummary: line };
+  }
   return null;
 }
 
@@ -399,5 +434,6 @@ export function makeSource(kind: SourceKind, opts: Record<string, string | undef
     speed: process.env.SHIP_SPEED ? Number(process.env.SHIP_SPEED) : undefined,
     emitEvery: process.env.SHIP_EMIT_EVERY ? Number(process.env.SHIP_EMIT_EVERY) : undefined,
     stack: kind === "stack",
+    flight: kind === "flight",
   });
 }

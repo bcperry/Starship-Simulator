@@ -47,16 +47,45 @@ scripts/        engine_demo.py, fleet_demo.py, command_fleet_demo.py,
 uv sync
 ```
 
-## Run
+## Run — the LEO mission
+
+The Phase-9 **full-stack LEO mission** is the primary runnable: Super Heavy
+(33× Raptor 3) + Starship (6× Raptor 3) insert a ~50 t payload into orbit.
+Run it headless, or watch it live in the viewer.
+
+```
+# headless: fly a mission to LEO, print the established orbit + SH banked reserve
+uv run python scripts/headless_mission.py            # -> perigee ~132 km, apogee ~353 km, e ~0.017
+
+# live: the mission in the browser (SSE), with the orbital-state panel
+"cd viewer && SOURCE=flight npm run dev"             # → http://localhost:5173
+```
+
+Mission knobs for the viewer's `flight` source (env):
+
+```
+SHIP_SEED=7 SHIP_SH_FAILURES=0 SHIP_SS_FAILURES=0 SOURCE=flight npm run dev
+```
+
+Or drive the mission loop standalone (controls on stdin, JSON docs on stdout):
+
+```
+uv run python -m simulator.flightloop --speed 20 --seed 7 --sh-failures 0 --ss-failures 0
+```
+
+### Legacy 2-D booster (not the mission)
+
+`uv run python -m simulator` is the **legacy 2-D single-booster model**
+(`simulator/rocket.py`) — handy for a quick altitude/velocity profile, and it
+plots to `trajectory.png` (altitude/MAV, velocity breakdown, pitch, flight
+path). It is **not** the orbital launch above; use `scripts/headless_mission.py`
+or `simulator.flightloop` for the LEO mission.
 
 ```
 uv run python -m simulator                 # default Super Heavy booster
 uv run python -m simulator --thrust 7200000 --burn-time 165 --area 1.45
 uv run python -m simulator --earth-rotation # account for the launch site spinning
 ```
-
-The sim stops at apogee and saves `trajectory.png`: altitude/MAV profile,
-velocity breakdown, pitch angle, and the flight path on a non-log scale.
 
 ## Full-stack LEO mission
 
@@ -70,13 +99,18 @@ inserts a ~50 t payload into LEO** (perigee above the 100 km line) while
 ```
 uv run python scripts/headless_mission.py            # headless LEO run + orbit readout
 uv run python -m simulator.flightloop --speed 20     # live mission (SSE to the viewer)
+cd viewer && SOURCE=flight npm run dev               # same mission, in the browser
 ```
 
-Acceptance (`tests/test_flight.py`): a launch suffers **1-3 engine failures in
-aggregate** yet still establishes LEO (perigee >= 100 km); Super Heavy banks
-its boostback propellant; Starship alone cannot reach orbit. Losing 3+ of
-Starship's 6 engines is a genuine anomaly the stage re-enters on (honest,
-not a sim bug).
+Acceptance (`tests/test_flight.py`): a **failure-free** launch establishes LEO
+(perigee >= 100 km) **robustly across multiple seeds** — a single-seed success
+is explicitly not sufficient, and there is comfortable margin once Earth's
+rotation is credited. An **engine-out** run completes without crashing (the
+vehicle degrades gracefully; at the edge of the envelope it re-enters rather
+than "crashes"). Super Heavy **banks** its boostback propellant, and that
+reserve is asserted to cover a real RTLS (down + boostback + terminal) delta-v
+budget with margin. And **Starship alone cannot reach orbit** — the stack is
+required.
 
 ## Engine model
 
@@ -175,30 +209,41 @@ eng = TelemetryEngine("sh-07", RaptorEngine(), pub, vehicle_id="super-heavy")
 ### Telemetry UI (`viewer/` — the full-stack foundation)
 
 A **TypeScript/React** viewer for exactly this wire — the starting point for
-building the product UX. It has two interchangeable data sources behind one
+building the product UX. It has four interchangeable data sources behind one
 `/api/stream`:
 
 - **`kafka`** — consumes your broker (`starship.engine.command` +
   `starship.engine.telemetry`), the same records as above;
 - **`mock`** — a synthetic 33-engine stream (one starves → `cut`) so you can
-  shape the UI with no broker attached.
+  shape the UI with no broker attached;
+- **`stack`** — spawns the full-stack ship-level mission (`simulator.stackloop`);
+- **`flight`** — spawns the **Phase-9 orbital LEO mission**
+  (`simulator.flightloop`): the same per-engine/ship/stack stream **plus** a
+  `flight.state` document (position, velocity, q/Mach, coast-orbit elements,
+  staging, banked reserve) that drives the **Mission · orbital state** panel.
 
 You get a live fleet board (total thrust, propellant flow, firing/cut counts,
 worst chamber pressure/ISP, min propellant remaining), a thrust-and-flow
 trend chart, per-engine cards (state, P_c, Isp, mdot, propellant, throttle
 demand vs actual, sparklines, command/telemetry seq), and a raw message feed.
+In `flight` mode, the top panel reads the real orbit: altitude/downrange,
+velocity/heading, Mach/q, Δv spent, perigee/apogee/inclination/eccentricity
+against the 100 km LEO line, SH MECO / SS SECO, the banked SH reserve and
+jettisoned stack, and both vessels' firing/failed/tank state.
 
 ```bash
 cd viewer && npm install
 
 SOURCE=mock npm run dev                          # build the UX with a synthetic feed
-SOURCE=stack npm run dev                         # full stack: Super Heavy -> Starship
+SOURCE=stack npm run dev                         # full stack: Super Heavy -> Starship (ship-level)
+SOURCE=flight npm run dev                        # the Phase-9 LEO mission + orbital-state panel
+SHIP_SEED=7 SHIP_SH_FAILURES=1 SHIP_SS_FAILURES=0 SOURCE=flight npm run dev  # inject failures
 SOURCE=kafka BOOTSTRAP_SERVERS=localhost:9092 \
   COMMAND_TOPIC=starship.engine.command \
   TELEMETRY_TOPIC=starship.engine.telemetry \
   npm run dev                                     # ...or against your docker-broker
 
-npm run build && SOURCE=kafka npm start           # one port: API + UI on :8080
+npm run build && SOURCE=kafka npm start           # one port: API + UI (prod)
 ```
 
 The architecture is deliberately composable — `shared/types.ts` (wire schema),

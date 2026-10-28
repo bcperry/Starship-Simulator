@@ -8,6 +8,7 @@ import { ControlPanel } from "./components/ControlPanel";
 import { EngineGrid } from "./components/EngineGrid";
 import { FlameIcon, PauseIcon, PlayIcon, RocketIcon } from "./components/Icons";
 import { FleetBoard } from "./components/FleetBoard";
+import { FlightPanel } from "./components/FlightPanel";
 import { MessageFeed } from "./components/MessageFeed";
 import { Panel } from "./components/Panel";
 import { PhaseBar } from "./components/PhaseBar";
@@ -39,11 +40,13 @@ export default function App() {
             <RocketIcon style={{ color: "var(--accent)" }} />
           </span>
           <div>
-            <h1>Starship · Ship + Engine</h1>
+            <h1>Starship · {snapshot.flight ? "LEO mission" : "Ship + Engine"}</h1>
             <div className="sub mono">
-              {source ? `${source === "mock" ? "synthetic feed (mock)" : "kafka broker"} · ${
-                summary.engine_count
-              } engines` : "connecting to feed…"}
+              {source
+                ? `${source === "mock" ? "synthetic feed (mock)" : source === "flight" ? "LEO mission feed" : source === "stack" ? "full-stack feed" : "kafka broker"} · ${
+                    summary.engine_count
+                  } engines`
+                : "connecting to feed…"}
               {tNow !== null && <> · T+ {tNow.toFixed(1)}s</>}
             </div>
           </div>
@@ -78,6 +81,8 @@ export default function App() {
 
       <div className="grid">
         <div className="col">
+          {snapshot.flight && <FlightPanel flight={snapshot.flight} />}
+
           <Panel title="Run control" hint={snapshot.stack ? "new run · throttle · cut active stage — drives the stack" : "new run · throttle · MECO — drives the ship sim"}>
             <ControlPanel ship={snapshot.ship} vehicleId={`starship`} stackMode={!!snapshot.stack} />
           </Panel>

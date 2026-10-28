@@ -42,6 +42,8 @@ export function MessageFeed({ lines }: { lines: FeedLine[] }) {
           <option value="command">commands</option>
           <option value="telemetry">telemetry</option>
           <option value="ship">ship</option>
+          <option value="stack">stack</option>
+          <option value="flight">flight</option>
         </select>
       </div>
 
@@ -57,7 +59,7 @@ export function MessageFeed({ lines }: { lines: FeedLine[] }) {
               <span className="ts" style={{ justifySelf: "start" }}>
                 {clock(l.tsMs).slice(3)}
               </span>
-              <span className={`tag ${l.kind}`}>{l.kind === "command" ? "cmd" : l.kind === "ship" ? "ship" : "tel"}</span>
+              <span className={`tag ${l.kind}`}>{l.kind === "command" ? "cmd" : l.kind === "ship" ? "ship" : l.kind === "stack" ? "stack" : l.kind === "flight" ? "flt" : "tel"}</span>
               <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
                 <span className="eid">{l.engine_id}</span>
                 <span className="tx">{l.summary}</span>

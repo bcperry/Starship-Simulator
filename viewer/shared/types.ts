@@ -4,6 +4,7 @@ export const ENGINE_TELEMETRY = "engine.telemetry";
 export const ENGINE_COMMAND = "engine.command";
 export const SHIP_STATUS = "ship.status"; // ship loop -> viewers: shared fuel + run state
 export const SHIP_CONTROL = "ship.control"; // operator -> ship loop: start_run / throttle / meco
+export const FLIGHT_STATE = "flight.state"; // mission loop -> viewers: 6-DOF state + orbit elements
 
 export interface MDot {
   total: number;
@@ -127,13 +128,91 @@ export interface ShipAck {
 }
 
 export interface LineSummary {
-  kind: "command" | "telemetry" | "ship" | "stack";
+  kind: "command" | "telemetry" | "ship" | "stack" | "flight";
   t: number;
   summary: string;
   engine_id: string;
   seq: number;
   state?: string;
   ts_ms?: number;
+}
+
+// --- flight.state: the Phase-9 orbital mission (simulator/flight.py) -------
+
+export type FlightPhase = "liftoff" | "staging" | "upper" | "done";
+
+export interface FlightPosition {
+  lat_deg: number;
+  lon_deg: number;
+  alt_m: number;
+  downrange_m: number;
+}
+
+export interface FlightVelocity {
+  speed_ms: number;
+  east_ms: number;
+  north_ms: number;
+  up_ms: number;
+  heading_deg: number;
+}
+
+export interface FlightAerodynamics {
+  mach: number;
+  q_pa: number;
+  max_q_pa: number;
+}
+
+export interface FlightOrbit {
+  a_km: number;        // semi-major axis (km)
+  e: number;           // eccentricity
+  i_deg: number;       // inclination (deg)
+  raan_deg: number;    // right ascension of ascending node (deg)
+  perigee_km: number;  // perigee altitude (km)
+  apogee_km: number;   // apogee altitude (km)
+}
+
+export interface FlightStaging {
+  staged: boolean;
+  sh_meco_t: number | null;
+  ss_seco_t: number | null;
+  sh_boostback_reserve_kg: number;
+  sh_dry_kg: number;
+  sh_residual_ox_kg: number;
+  sh_residual_ch4_kg: number;
+  jettisoned_kg: number;
+}
+
+export interface FlightVehicleView {
+  vehicle_id: string;
+  firing: number;
+  failed: number;
+  tank_ox_kg: number;
+  tank_ch4_kg: number;
+  thrust_n: number;
+  meco: boolean;
+}
+
+export interface FlightStateMessage {
+  v: number;
+  type: typeof FLIGHT_STATE;
+  t: number;
+  phase: FlightPhase;
+  position: FlightPosition;
+  velocity: FlightVelocity;
+  aerodynamics: FlightAerodynamics;
+  mass_kg: number;
+  thrust_n: number;
+  stats: {
+    apogee_m: number;
+    delta_v_ms: number;
+    drag_loss_ms: number;
+    pitch_deg: number;
+  };
+  orbit: FlightOrbit | null;
+  crashed: boolean;
+  staging: FlightStaging;
+  ships: Record<string, FlightVehicleView>;
+  mission: Record<string, number>;
 }
 
 export type StackPhase = "liftoff" | "staging" | "upper" | "done";
@@ -166,4 +245,5 @@ export type FeedEvent =
   | ({ kind: "command"; message: CommandMessage } & { lineSummary: LineSummary })
   | ({ kind: "telemetry"; message: TelemetryMessage } & { lineSummary: LineSummary })
   | ({ kind: "ship"; message: ShipStatusMessage } & { lineSummary: LineSummary })
-  | ({ kind: "stack"; message: StackStatusMessage } & { lineSummary: LineSummary });
+  | ({ kind: "stack"; message: StackStatusMessage } & { lineSummary: LineSummary })
+  | ({ kind: "flight"; message: FlightStateMessage } & { lineSummary: LineSummary });
