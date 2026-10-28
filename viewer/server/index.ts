@@ -74,6 +74,21 @@ async function main() {
     }
   });
 
+  // Change the sim speed (sim-seconds per real second). The stdio source
+  // respawns the sim at the new --speed and lights a fresh run at that rate.
+  app.post<{ Body: { speed: number } }>("/api/speed", async (req, reply) => {
+    const speed = Number((req.body as { speed?: unknown })?.speed);
+    if (!Number.isFinite(speed) || speed <= 0) {
+      return reply.code(400).send({ ok: false, error: "body must be { speed: number > 0 }" });
+    }
+    try {
+      const ack = await store.setSpeed(speed);
+      return reply.send({ ok: true, speed, ack });
+    } catch (err) {
+      return reply.code(502).send({ ok: false, error: `speed change failed: ${(err as Error).message}` });
+    }
+  });
+
   app.get("/api/stream", (req, reply) => {
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",

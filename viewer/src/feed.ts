@@ -231,6 +231,28 @@ class ClientFeed {
     return ack;
   }
 
+  /**
+   * Change the sim speed (sim-seconds per real second). The server respawns
+   * the sim at the new rate and lights a fresh run, so it takes effect at once.
+   */
+  async setSpeed(speed: number): Promise<{ ok: boolean; speed?: number; error?: string }> {
+    let out: { ok: boolean; speed?: number; error?: string } = { ok: false };
+    try {
+      const r = await fetch("/api/speed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ speed }),
+      });
+      const j = (await r.json()) as { ok?: boolean; speed?: number; error?: string };
+      if (!r.ok) out = { ok: false, error: j?.error ?? `HTTP ${r.status}` };
+      else out = { ok: true, speed: j?.speed ?? speed };
+    } catch (e) {
+      out = { ok: false, error: (e as Error).message };
+    }
+    this.markDirty();
+    return out;
+  }
+
   // ---- data application ------------------------------------------------
 
   private apply(snap: ServerSnapshot): void {

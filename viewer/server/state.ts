@@ -177,4 +177,9 @@ export class FeedStore {
     };
     return this.source.sendControl(body as never);
   }
+
+  /** Change the sim speed (sim-seconds / real-second); respawns + fresh run. */
+  setSpeed(speed: number, run?: Record<string, unknown>): Promise<unknown> {
+    return this.source.setSpeed(speed, run);
+  }
 }

@@ -44,6 +44,12 @@ export interface Source {
   isClosed(): boolean;
   sendControl(msg: ShipControlMessage): Promise<unknown>;
   restart(onEvent: (ev: FeedEvent) => void): void;
+  /**
+   * Change the sim speed (sim-seconds per real second). For the stdio source
+   * this respawns the Python sim at the new --speed and lights a fresh run
+   * (start_run) at that speed.
+   */
+  setSpeed(speed: number, run?: Record<string, unknown>): Promise<unknown>;
 }
 
 function thrustMN(n: number): string {
@@ -155,7 +161,12 @@ export class ShipProcessSource implements Source {
       }
     });
     proc.on("exit", () => {
-      this.dead = true;
+      // Only the CURRENT child may mark the source dead. A child we
+      // deliberately killed (setSpeed / restart) fires its exit event
+      // asynchronously AFTER the replacement child is assigned; unconditionally
+      // setting this.dead would make isClosed() sticky-true and send flush()
+      // into an infinite respawn loop.
+      if (this.proc === proc) this.dead = true;
     });
   }
 
@@ -203,6 +214,21 @@ export class ShipProcessSource implements Source {
   restart(onEvent: (ev: FeedEvent) => void): void {
     this.stop();
     this.start(onEvent);
+  }
+
+  async setSpeed(speed: number, _run?: Record<string, unknown>): Promise<unknown> {
+    const s = Math.max(0.05, Number(speed) || 1);
+    // (re)write the --speed argument and respawn the sim at that rate.
+    // The sim self-arms on boot (no start_run needed — an explicit start_run
+    // without lox_kg/ch4_kg would wipe the tank and leave the fleet cut).
+    const i = this.args.indexOf("--speed");
+    if (i >= 0) this.args[i + 1] = String(s);
+    else this.args.push("--speed", String(s));
+    const onEvt = this.onEvent ?? (() => {});
+    this.restart(onEvt);
+    // brief settle so the first frames of the fresh run land before we ack.
+    await new Promise((r) => setTimeout(r, 500));
+    return { ok: true, speed: s };
   }
 }
 
@@ -369,6 +395,11 @@ export class KafkaSource implements Source {
   restart(onEvent: (ev: FeedEvent) => void): void {
     this.stop();
     this.start(onEvent);
+  }
+
+  async setSpeed(_speed: number, _run?: Record<string, unknown>): Promise<unknown> {
+    // Kafka transport has no per-process sim speed; nothing to change.
+    return { ok: true, note: "speed is a no-op for the kafka source" };
   }
 }
 

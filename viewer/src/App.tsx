@@ -5,6 +5,7 @@ import type { TelemetryMessage } from "@shared/types";
 import { useFeed } from "./hooks/useFeed";
 
 import { ControlPanel } from "./components/ControlPanel";
+import { SpeedControl } from "./components/SpeedControl";
 import { EngineGrid } from "./components/EngineGrid";
 import { FlameIcon, PauseIcon, PlayIcon, RocketIcon } from "./components/Icons";
 import { FleetBoard } from "./components/FleetBoard";
@@ -91,6 +92,8 @@ export default function App() {
               <EngineDiagram engines={engines} />
             </div>
           )}
+
+          {snapshot.flight && <SpeedControl initial={8} />}
 
           <Panel title="Run control" hint={snapshot.stack ? "new run · throttle · cut active stage — drives the stack" : "new run · throttle · MECO — drives the ship sim"}>
             <ControlPanel ship={snapshot.ship} vehicleId={`starship`} stackMode={!!snapshot.stack} />

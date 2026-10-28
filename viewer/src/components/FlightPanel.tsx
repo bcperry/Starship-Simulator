@@ -75,7 +75,11 @@ export function FlightPanel({ flight }: { flight: FlightStateMessage }) {
           <div className="fp-block">
             <div className="fp-h">
               Coast orbit
-              {o && <span className={`orbbadge ${leo ? "leo" : "sub"}`}>{leo ? "LEO" : o.perigee_km < 0 ? "UNBOUND" : "SUB-ORBITAL"}</span>}
+              {o ? (
+                <span className={`orbbadge ${leo ? "leo" : "sub"}`}>{leo ? "LEO" : o.perigee_km < 0 ? "UNBOUND" : "SUB-ORBITAL"}</span>
+              ) : (
+                <span className="orbbadge sub">{flight.crashed ? "RE-ENTRY" : "UNBOUND"}</span>
+              )}
             </div>
             {o ? (
               <>
@@ -98,7 +102,7 @@ export function FlightPanel({ flight }: { flight: FlightStateMessage }) {
               <div className="fp-note">
                 {flight.crashed
                   ? "Trajectory is sub-orbital — perigee below the surface (re-entry)."
-                  : "Ascent — coast orbit not yet established (perigee sub-orbital)."}
+                  : "Coast orbit not established — the trajectory is unbound (past local escape). Restart the run to capture into LEO."}
               </div>
             )}
           </div>

@@ -477,3 +477,26 @@ footer.foot a { color: var(--ink-3); }
 .lg.sw-failed { background: var(--red); }
 .lg.sw-cut { background: transparent; border: 2.5px solid var(--red); }
 .lg.sw-idle { background: transparent; border: 2px solid var(--ink-3); }
+
+/* ---- sim-speed control ---------------------------------------------------- */
+.speedctl {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px 12px; border: 1px solid var(--panel-line-soft); border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.01), transparent);
+}
+.sc-lbl { font: 700 10.5px var(--font); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-4); margin-right: 2px; }
+.sc-btn {
+  border: 1px solid var(--panel-line); border-radius: 8px; background: var(--panel-2);
+  color: var(--ink-3); font: 700 12px var(--mono); padding: 6px 11px; cursor: pointer; min-width: 44px;
+}
+.sc-btn:hover { border-color: var(--ink-4); color: var(--ink); }
+.sc-btn.sel { background: rgba(55,225,168,.12); border-color: rgba(55,225,168,.45); color: var(--accent); box-shadow: 0 0 0 1px rgba(55,225,168,.15) inset; }
+.sc-btn:disabled { opacity: .5; cursor: default; }
+.sc-custom {
+  border: 1px solid var(--panel-line); border-radius: 8px; background: var(--panel-2);
+  color: var(--ink); width: 68px; padding: 6px 9px; font-size: 12px;
+}
+.sc-custom:focus { outline: none; border-color: var(--accent); }
+.sc-msg { font-size: 11.5px; margin-left: auto; min-height: 1em; }
+.sc-msg.ok { color: var(--accent); }
+.sc-msg.err { color: var(--red); }
