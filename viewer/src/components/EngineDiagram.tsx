@@ -1,10 +1,11 @@
 /*
  Engine diagram.
-   Super Heavy  — the 33‑Raptor Octaweb (1 + 8 + 14 + 10), evenly packed with
-                 real gaps between circles, each coloured by live state.
-   Starship    — six Raptors: THREE larger Vacuum (Vac) engines outboard and
-                 THREE smaller Sea‑Level (SL) engines inboard, as on the real
-                 vehicle.
+   Super Heavy  — the 33‑Raptor web, laid out exactly like the reference photo:
+                 3 inner (triangle, one at top) + 10 middle + 20 outer, evenly
+                 packed with small gaps, each coloured by live state.
+   Starship    — six Raptors: THREE large Vacuum (Vac) engines outboard and
+                 THREE smaller Sea‑Level (SL) engines inboard (interleaved),
+                 the Vacs being the largest of all.
    States:       firing → filled (glow)   failed → solid red
                  cut    → hollow red ring  idle   → hollow white
  */
@@ -28,9 +29,11 @@ export interface Cell {
   kind: "vac" | "sl" | "core";
 }
 
-const SH: Foot = { core: 0.075, ring: 0.100, glow: 0.120 };
-const VAC: Foot = { core: 0.115, ring: 0.140, glow: 0.165 };
-const SL: Foot = { core: 0.090, ring: 0.112, glow: 0.135 };
+// SH: uniform size, ~0.13 engine radius (measured from the reference image).
+const SH: Foot = { core: 0.115, ring: 0.140, glow: 0.150 };
+// VAC (Starship vacuum) is the LARGEST; SL (sea‑level) the smallest.
+const VAC: Foot = { core: 0.170, ring: 0.200, glow: 0.220 };
+const SL: Foot = { core: 0.100, ring: 0.130, glow: 0.150 };
 
 function stateOf(e: EngineView | undefined): EState {
   const s = e?.telemetry?.state;
@@ -48,10 +51,12 @@ export function shOctaweb(layout: EngineView[]): Cell[] {
     const [x, y] = spot(r, deg);
     out.push({ x, y, core: foot.core, ring: foot.ring, glow: foot.glow, kind });
   };
-  push(0, 0, SH, "core");                                    // 1  centre
-  for (let k = 0; k < 8; k++) push(0.45, 90 + k * 45, SH, "core");          // 8
-  for (let k = 0; k < 14; k++) push(0.70, 90 + 12.857 + k * (360 / 14), SH, "core"); // 14
-  for (let k = 0; k < 10; k++) push(1.0, 90 + 18 + k * 36, SH, "core");     // 10
+  // 3 inner — a triangle, one at the top (90/210/330°), r ≈ 0.214
+  for (const a of [90, 210, 330]) push(0.214, a, SH, "core");
+  // 10 middle — one at top, every 36°, r ≈ 0.599
+  for (let k = 0; k < 10; k++) push(0.599, 90 + k * 36, SH, "core");
+  // 20 outer — offset 9° (staggered into the 10‑ring gaps), every 18°, r = 1.0
+  for (let k = 0; k < 20; k++) push(1.0, 9 + k * 18, SH, "core");
   // map engines (sh-01..33) onto the 33 slots, in order
   return out.map((c, i) => ({
     ...c,
@@ -67,14 +72,13 @@ export function ssWeb(layout: EngineView[]): Cell[] {
     const [x, y] = spot(r, deg);
     out.push({ x, y, core: foot.core, ring: foot.ring, glow: foot.glow, kind });
   };
-  // three larger Vacuum engines, outboard (12 / 4 / 8 o'clock)
+  // three LARGEST Vacuum engines, outboard (12 / 4 / 8 o'clock)
   for (const a of [90, 210, 330]) push(0.82, a, VAC, "vac");
-  // three smaller Sea‑Level engines, inboard (in the gaps: 2 / 6 / 10 o'clock)
-  for (const a of [150, 270, 30]) push(0.34, a, SL, "sl");
+  // three smaller Sea‑Level engines, inboard & interleaved (2 / 6 / 10 o'clock)
+  for (const a of [30, 150, 270]) push(0.38, a, SL, "sl");
   // map engines (ss-01..06): Vacs=ss-01..03 (outboard), SLs=ss-04..06 (inboard)
-  const order = [0, 1, 2, 3, 4, 5];
   return out.map((c, i) => {
-    const e = layout[order[i]];
+    const e = layout[i];
     return { ...c, id: e?.id ?? `ss-${i + 1}`, state: stateOf(e), thrust: e?.telemetry?.thrust_n ?? 0 };
   });
 }
